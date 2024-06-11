@@ -23,6 +23,8 @@ class JaxUrdf:
     """A differentiable robot kinematics model."""
 
     num_joints: jdc.Static[int]
+    joint_names: jdc.Static[Tuple[str]]
+    """List of joint names, in order."""
 
     num_actuated_joints: jdc.Static[int]
     idx_actuated_joint: Int[Array, "joints"]
@@ -31,9 +33,6 @@ class JaxUrdf:
     joint_twists: Float[Array, "act_joints 6"]
     limits_lower: Float[Array, "act_joints"]
     limits_upper: Float[Array, "act_joints"]
-
-    # mimic_joint_inds: Int[Array, "joints"]
-    # """Mimicked joint index, per joint. -1 if not a mimic joint."""
 
     Ts_parent_joint: Float[Array, "joints 7"]
     parent_indices: Int[Array, "joints"]
@@ -52,11 +51,12 @@ class JaxUrdf:
         joint_lim_lower = list[float]()
         joint_lim_upper = list[float]()
         parent_indices = list[int]()
-        # mimic_joint_inds = list[int]()
+        joint_names = list[str]()
         idx_actuated_joint = list[int]()
 
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             assert joint.origin.shape == (4, 4)
+            joint_names.append(joint.name)
 
             # Check if this joint is a mimic joint.
             if joint.mimic is not None:
@@ -110,12 +110,12 @@ class JaxUrdf:
             Ts_parent_joint.append(vtf.SE3.from_matrix(T_parent_joint).wxyz_xyz)  # type: ignore
 
         joint_twists = jnp.array(joint_twists)
-        # mimic_joint_inds = jnp.array(mimic_joint_inds)
         limits_lower = jnp.array(joint_lim_lower)
         limits_upper = jnp.array(joint_lim_upper)
         Ts_parent_joint = jnp.array(Ts_parent_joint)
         parent_indices = jnp.array(parent_indices)
         idx_actuated_joint = jnp.array(idx_actuated_joint)
+        joint_names = tuple[str](joint_names)
 
         num_joints = len(urdf.joint_map)
         num_actuated_joints = len(urdf.actuated_joints)
@@ -131,9 +131,9 @@ class JaxUrdf:
 
         return JaxUrdf(
             num_joints=num_joints,
+            joint_names=joint_names,
             num_actuated_joints=num_actuated_joints,
             idx_actuated_joint=idx_actuated_joint,
-            # mimic_joint_inds=mimic_joint_inds,
             joint_twists=joint_twists,
             Ts_parent_joint=Ts_parent_joint,
             limits_lower=limits_lower,
@@ -238,16 +238,15 @@ class JaxUrdfwithCollision(JaxUrdf):
         jax_urdf = JaxUrdf.from_urdf(urdf)
         return JaxUrdfwithCollision(
             num_joints=len(jax_urdf.parent_indices),
+            joint_names=jax_urdf.joint_names,
             num_actuated_joints=jax_urdf.num_actuated_joints,
             idx_actuated_joint=jax_urdf.idx_actuated_joint,
-            # mimic_joint_inds=jax_urdf.mimic_joint_inds,
             joint_twists=jax_urdf.joint_twists,
             Ts_parent_joint=jnp.array(jax_urdf.Ts_parent_joint),
             limits_lower=jnp.array(jax_urdf.limits_lower),
             limits_upper=jnp.array(jax_urdf.limits_upper),
             parent_indices=jnp.array(jax_urdf.parent_indices),
             num_spheres=num_spheres,
-            # Ts_coll_joint=Ts_coll_joint,
             coll_link_idx=idx,
             coll_link_centers=centers,
             coll_link_radii=radii,
