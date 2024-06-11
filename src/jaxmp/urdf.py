@@ -8,27 +8,34 @@ import jaxlie
 import numpy as onp
 import viser.transforms as vtf
 import yourdfpy
+import warnings
 from jax import Array
 from jax import numpy as jnp
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 from typing import Dict, List, Tuple
 import tyro
 
 from jaxmp.collision import SphereCollision
 
-# Maybe this can be basically a reimplementaiton of `yourdfpy`, but in jax.
-# And we can take inspiration from keeping actuated_joints and joints separate.
-# Then we can optimize for the actuated joints, and use the other joints as constraints.
 
 @jdc.pytree_dataclass
 class JaxUrdf:
     """A differentiable robot kinematics model."""
 
     num_joints: jdc.Static[int]
-    joint_twists: Float[Array, "joints 6"]
+
+    num_actuated_joints: jdc.Static[int]
+    idx_actuated_joint: Int[Array, "joints"]
+    """Index of actuated joint in `act_joints`, if it is actuated. -1 otherwise."""
+
+    joint_twists: Float[Array, "act_joints 6"]
+    limits_lower: Float[Array, "act_joints"]
+    limits_upper: Float[Array, "act_joints"]
+
+    # mimic_joint_inds: Int[Array, "joints"]
+    # """Mimicked joint index, per joint. -1 if not a mimic joint."""
+
     Ts_parent_joint: Float[Array, "joints 7"]
-    limits_lower: Float[Array, "joints"]
-    limits_upper: Float[Array, "joints"]
     parent_indices: Int[Array, "joints"]
 
     @staticmethod
@@ -45,61 +52,105 @@ class JaxUrdf:
         joint_lim_lower = list[float]()
         joint_lim_upper = list[float]()
         parent_indices = list[int]()
-        for joint in urdf.actuated_joints:
-            assert joint.origin.shape == (4, 4)
-            assert joint.axis.shape == (3,)
-            assert (
-                joint.limit is not None
-                and joint.limit.lower is not None
-                and joint.limit.upper is not None
-            ), "We currently assume there are joint limits!"
-            joint_lim_lower.append(joint.limit.lower)
-            joint_lim_upper.append(joint.limit.upper)
+        # mimic_joint_inds = list[int]()
+        idx_actuated_joint = list[int]()
 
-            # We use twists in the (v, omega) convention.
-            if joint.type == "revolute":
-                joint_twists.append(onp.concatenate([onp.zeros(3), joint.axis]))
-            elif joint.type == "prismatic":
-                joint_twists.append(onp.concatenate([joint.axis, onp.zeros(3)]))
+        for joint_idx, joint in enumerate(urdf.joint_map.values()):
+            assert joint.origin.shape == (4, 4)
+
+            # Check if this joint is a mimic joint.
+            if joint.mimic is not None:
+                mimicked_joint = urdf.joint_map[joint.mimic.joint]
+                mimicked_joint_idx = urdf.actuated_joints.index(mimicked_joint)
+                assert mimicked_joint_idx < joint_idx, "Code + fk `fori_loop` assumes this!"
+                warnings.warn("Mimic joint detected, assuming multiplier=1.0, offset=0.0.")
+                act_joint_idx = urdf.actuated_joints.index(mimicked_joint)
+                idx_actuated_joint.append(act_joint_idx)
+
+                # ... skip the twist info, since mimic joints are not actuated.
+            elif joint in urdf.actuated_joints:
+                assert joint.axis.shape == (3,)
+                assert (
+                    joint.limit is not None
+                    and joint.limit.lower is not None
+                    and joint.limit.upper is not None
+                ), "We currently assume there are joint limits!"
+                joint_lim_lower.append(joint.limit.lower)
+                joint_lim_upper.append(joint.limit.upper)
+
+                act_joint_idx = urdf.actuated_joints.index(joint)
+                idx_actuated_joint.append(act_joint_idx)
+
+                # We use twists in the (v, omega) convention.
+                if joint.type == "revolute":
+                    joint_twists.append(onp.concatenate([onp.zeros(3), joint.axis]))
+                elif joint.type == "prismatic":
+                    joint_twists.append(onp.concatenate([joint.axis, onp.zeros(3)]))
             else:
-                assert False
+                idx_actuated_joint.append(-1)
+
 
             # Get the transform from the parent joint to the current joint.
-            # The loop is required to take unactuated joints into account.
+            # Do this for all the joints.
             T_parent_joint = joint.origin
-            parent_joint = joint_from_child[joint.parent]
-            root = False
-            while parent_joint not in urdf.actuated_joints:
-                T_parent_joint = parent_joint.origin @ T_parent_joint
-                if parent_joint.parent not in joint_from_child:
-                    root = True
-                    break
-                parent_joint = joint_from_child[parent_joint.parent]
+            if joint.parent not in joint_from_child:
+                # Must be root node.
+                parent_indices.append(-1)
+            else:
+                parent_joint = joint_from_child[joint.parent]
+                parent_index = urdf.joint_names.index(parent_joint.name)
+                if parent_index >= joint_idx:
+                    warnings.warn(f"Parent index {parent_index} >= joint index {joint_idx}! Assuming that parent is root.")
+                    if parent_joint.parent != urdf.scene.graph.base_frame:
+                        raise ValueError("Parent index >= joint_index, but parent is not root!")
+                    T_parent_joint = parent_joint.origin @ T_parent_joint  # T_root_joint.
+                    parent_index = -1
+                parent_indices.append(parent_index)
+
             Ts_parent_joint.append(vtf.SE3.from_matrix(T_parent_joint).wxyz_xyz)  # type: ignore
-            parent_indices.append(
-                -1 if root else urdf.actuated_joints.index(parent_joint)
-            )
 
         joint_twists = jnp.array(joint_twists)
+        # mimic_joint_inds = jnp.array(mimic_joint_inds)
+        limits_lower = jnp.array(joint_lim_lower)
+        limits_upper = jnp.array(joint_lim_upper)
+        Ts_parent_joint = jnp.array(Ts_parent_joint)
+        parent_indices = jnp.array(parent_indices)
+        idx_actuated_joint = jnp.array(idx_actuated_joint)
+
+        num_joints = len(urdf.joint_map)
+        num_actuated_joints = len(urdf.actuated_joints)
+
+        assert idx_actuated_joint.shape == (len(urdf.joint_map),)
+        assert joint_twists.shape == (num_actuated_joints, 6)
+        assert limits_lower.shape == (num_actuated_joints,)
+        assert limits_upper.shape == (num_actuated_joints,)
+        # assert mimic_joint_inds.shape == (num_joints,)
+        assert Ts_parent_joint.shape == (num_joints, 7)
+        assert parent_indices.shape == (num_joints,)
+        assert idx_actuated_joint.max() == num_actuated_joints - 1
+
         return JaxUrdf(
-            num_joints=len(parent_indices),
+            num_joints=num_joints,
+            num_actuated_joints=num_actuated_joints,
+            idx_actuated_joint=idx_actuated_joint,
+            # mimic_joint_inds=mimic_joint_inds,
             joint_twists=joint_twists,
-            Ts_parent_joint=jnp.array(Ts_parent_joint),
-            limits_lower=jnp.array(joint_lim_lower),
-            limits_upper=jnp.array(joint_lim_upper),
-            parent_indices=jnp.array(parent_indices),
+            Ts_parent_joint=Ts_parent_joint,
+            limits_lower=limits_lower,
+            limits_upper=limits_upper,
+            parent_indices=parent_indices,
         )
 
-    @jdc.jit
+    # @jdc.jit
     def forward_kinematics(
         self,
-        cfg: Float[Array, "*batch num_joints"],
+        cfg: Float[Array, "*batch num_act_joints"],
     ) -> Float[Array, "*batch num_joints 7"]:
         batch_axes = cfg.shape[:-1]
-        assert cfg.shape == (*batch_axes, self.num_joints)
+        assert cfg.shape == (*batch_axes, self.num_actuated_joints)
 
         Ts_joint_child = jaxlie.SE3.exp(self.joint_twists * cfg[..., None]).wxyz_xyz
-        assert Ts_joint_child.shape == (*batch_axes, self.num_joints, 7)
+        assert Ts_joint_child.shape == (*batch_axes, self.num_actuated_joints, 7)
 
         def compute_joint(i: int, Ts_world_joint: Array) -> Array:
             T_world_parent = jnp.where(
@@ -107,11 +158,29 @@ class JaxUrdf:
                 jnp.broadcast_to(jaxlie.SE3.identity().wxyz_xyz, (*batch_axes, 7)),
                 Ts_world_joint[..., self.parent_indices[i], :],
             )
+
+            # If this joint is a mimic joint, then we need to use the mimic joint's transform.
+            # if self.mimic_joint_inds[i] != -1:
+            #     actuated_joint_idx = self.mimic_joint_inds[i]
+            # else:
+            #     actuated_joint_idx = self.idx_actuated_joint[i]
+            # actuated_joint_idx = jnp.where(
+            #     self.mimic_joint_inds[i] != -1,
+            #     self.mimic_joint_inds[i],
+            #     self.idx_actuated_joint[i]
+            # )
+            actuated_joint_idx = self.idx_actuated_joint[i]
+
+            T_joint_child = jnp.where(
+                actuated_joint_idx != -1,
+                Ts_joint_child[..., actuated_joint_idx, :],
+                jnp.broadcast_to(jaxlie.SE3.identity().wxyz_xyz, (*batch_axes, 7)),
+            )
             return Ts_world_joint.at[..., i, :].set(
                 (
                     jaxlie.SE3(T_world_parent)
                     @ jaxlie.SE3(self.Ts_parent_joint[i])
-                    @ jaxlie.SE3(Ts_joint_child[..., i, :])
+                    @ jaxlie.SE3(T_joint_child)
                 ).wxyz_xyz
             )
 
@@ -129,7 +198,6 @@ class JaxUrdf:
 class JaxUrdfwithCollision(JaxUrdf):
     """A differentiable, collision-aware robot kinematics model."""
     num_spheres: jdc.Static[int]
-    Ts_coll_joint: Float[Array, "spheres 7"]
     coll_link_idx: Int[Array, "spheres"]
     coll_link_centers: Float[Array, "spheres 3"]
     coll_link_radii: Float[Array, "spheres"]
@@ -144,53 +212,42 @@ class JaxUrdfwithCollision(JaxUrdf):
     ):
         # scrape the collision data.
         idx, centers, radii = [], [], []
-        Ts_coll_joint = []
 
-        joint_from_child = {joint.child: joint for joint in urdf.joint_map.values()}
-
-        for joint_name, joint in urdf.joint_map.items():
+        for joint_idx, joint in enumerate(urdf.joint_map.values()):
             if joint.child not in coll_dict:
                 continue
 
-            # Find the actuated joint that is the parent of this link.
-            parent_joint = joint
-            T_coll_joint = onp.eye(4)
-            while parent_joint not in urdf.actuated_joints:
-                T_coll_joint = parent_joint.origin @ T_coll_joint
-                parent_joint = joint_from_child[parent_joint.parent]
-
-            joint_idx = urdf.actuated_joints.index(parent_joint)
             list_of_spheres = coll_dict[joint.child]
             for sphere in list_of_spheres:
                 idx.append(joint_idx)
                 centers.append(sphere['center'])
                 radii.append(sphere['radius'])
-                Ts_coll_joint.append(vtf.SE3.from_matrix(T_coll_joint).wxyz_xyz)
 
 
         idx = jnp.array(idx)
         centers = jnp.array(centers)
         radii = jnp.array(radii)
-        Ts_coll_joint = jnp.array(Ts_coll_joint)
         num_spheres = centers.shape[0]
 
         assert (
             idx.shape == (num_spheres,) and
             centers.shape == (num_spheres, 3) and
-            radii.shape == (num_spheres,) and
-            Ts_coll_joint.shape == (num_spheres, 7)
+            radii.shape == (num_spheres,)
         )
 
         jax_urdf = JaxUrdf.from_urdf(urdf)
         return JaxUrdfwithCollision(
-            num_joints=jax_urdf.num_joints,
+            num_joints=len(jax_urdf.parent_indices),
+            num_actuated_joints=jax_urdf.num_actuated_joints,
+            idx_actuated_joint=jax_urdf.idx_actuated_joint,
+            # mimic_joint_inds=jax_urdf.mimic_joint_inds,
             joint_twists=jax_urdf.joint_twists,
-            Ts_parent_joint=jax_urdf.Ts_parent_joint,
-            limits_lower=jax_urdf.limits_lower,
-            limits_upper=jax_urdf.limits_upper,
-            parent_indices=jax_urdf.parent_indices,
+            Ts_parent_joint=jnp.array(jax_urdf.Ts_parent_joint),
+            limits_lower=jnp.array(jax_urdf.limits_lower),
+            limits_upper=jnp.array(jax_urdf.limits_upper),
+            parent_indices=jnp.array(jax_urdf.parent_indices),
             num_spheres=num_spheres,
-            Ts_coll_joint=Ts_coll_joint,
+            # Ts_coll_joint=Ts_coll_joint,
             coll_link_idx=idx,
             coll_link_centers=centers,
             coll_link_radii=radii,
@@ -199,7 +256,7 @@ class JaxUrdfwithCollision(JaxUrdf):
     @jdc.jit
     def d_world(
         self,
-        cfg: Float[Array, "num_joints"],
+        cfg: Float[Array, "num_act_joints"],
         other: SphereCollision
     ) -> Float[Array, "num_joints"]:
         """Check if the robot collides with the world, in the provided configuration.
@@ -226,23 +283,24 @@ class JaxUrdfwithCollision(JaxUrdf):
     @jdc.jit
     def as_spheres(
         self,
-        cfg: Float[Array, "*batch num_joints"]
+        cfg: Float[Array, "*batch num_act_joints"]
     ) -> Tuple[Float[Array, "*batch num_spheres 3"], Float[Array, "*batch num_spheres"]]:
         """Get the spheres in the world frame, in the provided configuration."""
         batch_size = cfg.shape[:-1]
         num_spheres = self.coll_link_centers.shape[0]
         Ts_world_joint = self.forward_kinematics(cfg)
+        assert Ts_world_joint.shape == (*batch_size, self.num_joints, 7)
 
         centers = jaxlie.SE3.from_translation(self.coll_link_centers)
         centers_transformed = (
             jaxlie.SE3(Ts_world_joint[..., self.coll_link_idx, :])
-            @ jaxlie.SE3(self.Ts_coll_joint)
             @ centers
         ).translation()
 
         assert centers_transformed.shape == (*batch_size, num_spheres, 3)
         assert self.coll_link_radii.shape == (num_spheres,)
         return centers_transformed, self.coll_link_radii
+
 
 def force_yumi_gripper_frozen() -> yourdfpy.URDF:
     from robot_descriptions.loaders.yourdfpy import load_robot_description
@@ -282,8 +340,8 @@ def main():
     # load the rest pose.
     yumi_rest = onp.array(yumi_cfg['robot_cfg']['rest_pose'])
 
-    # Temporary hack...
-    yourdf = force_yumi_gripper_frozen()
+    from robot_descriptions.loaders.yourdfpy import load_robot_description
+    yourdf = load_robot_description("yumi_description")
 
     jax_urdf = JaxUrdfwithCollision.from_urdf_and_coll(yourdf, yumi_coll)
 
@@ -313,6 +371,8 @@ def main():
     )
     urdf.update_cfg(yumi_rest)
 
+    jax_urdf.forward_kinematics(jnp.array(yumi_rest))
+    breakpoint()
 
     while True:
         time.sleep(10)
