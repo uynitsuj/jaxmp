@@ -301,29 +301,6 @@ class JaxUrdfwithCollision(JaxUrdf):
         return centers_transformed, self.coll_link_radii
 
 
-def force_yumi_gripper_frozen() -> yourdfpy.URDF:
-    from robot_descriptions.loaders.yourdfpy import load_robot_description
-    yourdf = load_robot_description("yumi_description")
-    yourdf.joint_map['gripper_l_joint'].type = 'fixed'
-    yourdf.joint_map['gripper_l_joint'].origin[0, 3] -= 0.025
-    yourdf.joint_map['gripper_l_joint_m'].type = 'fixed'
-    yourdf.joint_map['gripper_l_joint_m'].mimic = None
-    yourdf.joint_map['gripper_l_joint_m'].origin[0, 3] += 0.025
-    yourdf.joint_map['gripper_r_joint'].type = 'fixed'
-    yourdf.joint_map['gripper_r_joint'].origin[0, 3] -= 0.025
-    yourdf.joint_map['gripper_r_joint_m'].type = 'fixed'
-    yourdf.joint_map['gripper_r_joint_m'].mimic = None
-    yourdf.joint_map['gripper_r_joint_m'].origin[0, 3] += 0.025
-    yourdf._update_actuated_joints()
-    yourdf._cfg = yourdf.zero_cfg
-    yourdf._scene = yourdf._create_scene(
-        use_collision_geometry=False,
-        load_geometry=True,
-        force_mesh=True,
-        force_single_geometry_per_link=True,
-    )
-    return yourdf
-
 def main():
     from pathlib import Path
     import yaml
