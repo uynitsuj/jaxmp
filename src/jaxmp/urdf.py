@@ -29,6 +29,7 @@ class JaxUrdf:
     num_actuated_joints: jdc.Static[int]
     idx_actuated_joint: Int[Array, "joints"]
     """Index of actuated joint in `act_joints`, if it is actuated. -1 otherwise."""
+    is_actuated: Bool[Array, "joints"]
 
     joint_twists: Float[Array, "act_joints 6"]
     limits_lower: Float[Array, "act_joints"]
@@ -89,7 +90,6 @@ class JaxUrdf:
             else:
                 idx_actuated_joint.append(-1)
 
-
             # Get the transform from the parent joint to the current joint.
             # Do this for all the joints.
             T_parent_joint = joint.origin
@@ -115,6 +115,11 @@ class JaxUrdf:
         Ts_parent_joint = jnp.array(Ts_parent_joint)
         parent_indices = jnp.array(parent_indices)
         idx_actuated_joint = jnp.array(idx_actuated_joint)
+        is_actuated = jnp.where(
+            idx_actuated_joint != -1,
+            jnp.ones_like(idx_actuated_joint),
+            jnp.zeros_like(idx_actuated_joint),
+        )
         joint_names = tuple[str](joint_names)
 
         num_joints = len(urdf.joint_map)
@@ -124,7 +129,6 @@ class JaxUrdf:
         assert joint_twists.shape == (num_actuated_joints, 6)
         assert limits_lower.shape == (num_actuated_joints,)
         assert limits_upper.shape == (num_actuated_joints,)
-        # assert mimic_joint_inds.shape == (num_joints,)
         assert Ts_parent_joint.shape == (num_joints, 7)
         assert parent_indices.shape == (num_joints,)
         assert idx_actuated_joint.max() == num_actuated_joints - 1
@@ -134,6 +138,7 @@ class JaxUrdf:
             joint_names=joint_names,
             num_actuated_joints=num_actuated_joints,
             idx_actuated_joint=idx_actuated_joint,
+            is_actuated=is_actuated,
             joint_twists=joint_twists,
             Ts_parent_joint=Ts_parent_joint,
             limits_lower=limits_lower,
@@ -141,7 +146,7 @@ class JaxUrdf:
             parent_indices=parent_indices,
         )
 
-    # @jdc.jit
+    @jdc.jit
     def forward_kinematics(
         self,
         cfg: Float[Array, "*batch num_act_joints"],
@@ -159,21 +164,9 @@ class JaxUrdf:
                 Ts_world_joint[..., self.parent_indices[i], :],
             )
 
-            # If this joint is a mimic joint, then we need to use the mimic joint's transform.
-            # if self.mimic_joint_inds[i] != -1:
-            #     actuated_joint_idx = self.mimic_joint_inds[i]
-            # else:
-            #     actuated_joint_idx = self.idx_actuated_joint[i]
-            # actuated_joint_idx = jnp.where(
-            #     self.mimic_joint_inds[i] != -1,
-            #     self.mimic_joint_inds[i],
-            #     self.idx_actuated_joint[i]
-            # )
-            actuated_joint_idx = self.idx_actuated_joint[i]
-
             T_joint_child = jnp.where(
-                actuated_joint_idx != -1,
-                Ts_joint_child[..., actuated_joint_idx, :],
+                self.idx_actuated_joint[i] != -1,
+                Ts_joint_child[..., self.idx_actuated_joint[i], :],
                 jnp.broadcast_to(jaxlie.SE3.identity().wxyz_xyz, (*batch_axes, 7)),
             )
             return Ts_world_joint.at[..., i, :].set(
@@ -193,6 +186,23 @@ class JaxUrdf:
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 7)
         return Ts_world_joint
 
+    @jdc.jit
+    def forward_kinematics_tangent(
+        self,
+        cfg: Float[Array, "*batch num_act_joints"],
+    ) -> Float[Array, "*batch num_act_joints 7"]:
+        batch_axes = cfg.shape[:-1]
+        Ts_world_joint_wxyz_xyz = self.forward_kinematics(cfg)
+
+        # Convert to tangent space.
+        Ts_world_joint_tangent = jaxlie.SE3(Ts_world_joint_wxyz_xyz).log()
+        assert Ts_world_joint_tangent.shape == (*batch_axes, self.num_joints, 6)
+
+        # Only return the actuated joints!
+        Ts_world_joint_tangent_act = Ts_world_joint_tangent[..., self.is_actuated, :]
+
+        return Ts_world_joint_tangent_act
+
 
 @jdc.pytree_dataclass
 class JaxUrdfwithCollision(JaxUrdf):
@@ -203,7 +213,6 @@ class JaxUrdfwithCollision(JaxUrdf):
     coll_link_radii: Float[Array, "spheres"]
     # TODO self-collision + self-collision ignore -- put this into CollisionBody?
     # self_ignore: Float[Array, "spheres spheres"]  # ...make this sparse?
-    # This section ignores mimic joints!
 
     @staticmethod
     def from_urdf_and_coll(
@@ -240,6 +249,7 @@ class JaxUrdfwithCollision(JaxUrdf):
             num_joints=len(jax_urdf.parent_indices),
             joint_names=jax_urdf.joint_names,
             num_actuated_joints=jax_urdf.num_actuated_joints,
+            is_actuated=jax_urdf.is_actuated,
             idx_actuated_joint=jax_urdf.idx_actuated_joint,
             joint_twists=jax_urdf.joint_twists,
             Ts_parent_joint=jnp.array(jax_urdf.Ts_parent_joint),
@@ -302,6 +312,7 @@ class JaxUrdfwithCollision(JaxUrdf):
 
 
 def main():
+    """Small test script to visualize the Yumi robot, and the collision spheres, in viser."""
     from pathlib import Path
     import yaml
     import viser
@@ -316,8 +327,8 @@ def main():
     # load the rest pose.
     yumi_rest = onp.array(yumi_cfg['robot_cfg']['rest_pose'])
 
-    from robot_descriptions.loaders.yourdfpy import load_robot_description
-    yourdf = load_robot_description("yumi_description")
+    from jaxmp.yumi_helpers import get_yumi_urdf
+    yourdf = get_yumi_urdf()
 
     jax_urdf = JaxUrdfwithCollision.from_urdf_and_coll(yourdf, yumi_coll)
 
