@@ -125,7 +125,12 @@ class SphereSDF:
 @jdc.pytree_dataclass
 class MeshSDF(DiffSDF):
     vertices: Float[Array, "vert 3"]
-    faces: Float[Array, "face 3 3"]  # face, num_points (trimesh), 3 (3D)
+
+    # Three points per face, 3D points. In winding order.
+    faces_0: Float[Array, "face 3"]
+    faces_1: Float[Array, "face 3"]
+    faces_2: Float[Array, "face 3"]
+
     face_normals: Float[Array, "face 3"]
     face_areas: Float[Array, "face 1"]
 
@@ -138,8 +143,15 @@ class MeshSDF(DiffSDF):
         vertices = jnp.array(mesh.vertices)
         faces = jnp.array(mesh.faces)
         num_faces = faces.shape[0]
-        face_with_points = jax.vmap(lambda face: vertices[face], in_axes=-2)(faces)
-        assert face_with_points.shape == (num_faces, 3, 3), face_with_points.shape  # 3 points per face, 3D points.
+
+        faces_0 = vertices[faces[:, 0]]
+        faces_1 = vertices[faces[:, 1]]
+        faces_2 = vertices[faces[:, 2]]
+        assert (
+            faces_0.shape == (num_faces, 3)
+            and faces_1.shape == (num_faces, 3)
+            and faces_2.shape == (num_faces, 3)
+        )
 
         face_areas = mesh.area_faces
         face_areas = face_areas[:, None]
@@ -147,18 +159,19 @@ class MeshSDF(DiffSDF):
 
         return MeshSDF(
             vertices=vertices,
-            faces=face_with_points,
+            faces_0=faces_0,
+            faces_1=faces_1,
+            faces_2=faces_2,
             face_normals=jnp.array(mesh.face_normals),
             face_areas=jnp.array(face_areas)
         )
 
-    def d_points(self, points: Float[Array, "points 3"]) -> Float[Array, "points"]:
+    def d_points(self, points: Float[Array, "point 3"]) -> Float[Array, "point"]:
         """Calculate SDF of point(s) with respect to mesh."""
         n_points = points.shape[0]
-        n_faces = self.faces.shape[0]
 
         def d_points_fun(i: int, d_faces_points: Array) -> Array:
-            d_face_points = self._d_point_tris(
+            d_face_points = self.d_point_tris(
                 points[i],
             )
             min_dist_idx = jnp.argmin(jnp.abs(d_face_points))
@@ -172,123 +185,102 @@ class MeshSDF(DiffSDF):
             init_val=jnp.zeros((n_points,))
         )
         assert d_points.shape == (n_points,)
+
         return d_points
 
     @jax.jit
-    def _d_point_tris(
+    def d_point_tris(
         self,
-        point: Float[Array, "3"]
-    ) -> Float[Array, "face"]:
-        n_faces = self.faces.shape[0]
-
-        def d_face_points_fun(i: int, d_faces_points: Array) -> Array:
-            face_0 = self.faces[i, 0, :]
-            face_1 = self.faces[i, 1, :]
-            face_2 = self.faces[i, 2, :]
-
-            d_face_points = self.d_point_tri(
-                point,
-                face_0,
-                face_1,
-                face_2,
-                normal=self.face_normals[i],
-                area=self.face_areas[i]
-            )
-
-            return d_faces_points.at[i].set(d_face_points.squeeze())
-
-        d_face_points = jax.lax.fori_loop(
-            lower=0, 
-            upper=n_faces,
-            body_fun=d_face_points_fun,
-            init_val = jnp.zeros((n_faces,))
-        )
-        assert d_face_points.shape == (n_faces,)
-        return d_face_points
-
-    @staticmethod
-    @jax.jit
-    def d_point_tri(
         point: Float[Array, "3"],
-        face_0: Float[Array, "3"],
-        face_1: Float[Array, "3"],
-        face_2: Float[Array, "3"],
-        normal: Float[Array, "3"],
-        area: Float[Array, "1"]
     ) -> Float[Array, "1"]:
         # Reimplementation of pysdf.
-        uwv = MeshSDF.bary(point, face_0, face_1, face_2, normal, area)
+        n_faces = self.faces_0.shape[0]
+
+        uwv = self._bary(point)
 
         dist = jnp.linalg.norm(
             (
-                uwv[0] * face_0 + 
-                uwv[1] * face_1 + 
-                uwv[2] * face_2 - 
+                uwv[:, 0][..., None] * self.faces_0 + 
+                uwv[:, 1][..., None] * self.faces_1 + 
+                uwv[:, 2][..., None] * self.faces_2 - 
                 point
             ),
             axis=-1
         )
-        assert isinstance(dist, Array)
+        assert isinstance(dist, Array) and dist.shape == (n_faces,)
 
-        sign = MeshSDF.sign_point_tri(point, face_0, normal)
-        assert sign.shape == (1,)
+        sign = self._sign_point_tri(point)
+        assert sign.shape == (n_faces,)
 
-        dist_w_0 = jnp.where(uwv[0] < 0, MeshSDF.d_unsigned_point_lineseg(point, face_1, face_2), dist)
-        dist_w_1 = jnp.where(uwv[1] < 0, MeshSDF.d_unsigned_point_lineseg(point, face_0, face_2), dist_w_0)  # type: ignore (complains when jit added)
-        dist_w_2 = jnp.where(uwv[2] < 0, MeshSDF.d_unsigned_point_lineseg(point, face_0, face_1), dist_w_1)
-        assert dist_w_2.shape == (1,)
+        dist_w_0 = jnp.where(
+            uwv[:, 0] < 0,
+            self._d_unsigned_point_lineseg(point, self.faces_1, self.faces_2),
+            dist,
+        )
+        assert isinstance(dist_w_0, Array) and dist_w_0.shape == (n_faces,)
+        dist_w_1 = jnp.where(
+            uwv[:, 1] < 0,
+            self._d_unsigned_point_lineseg(point, self.faces_0, self.faces_2),
+            dist_w_0
+        )
+        assert isinstance(dist_w_1, Array) and dist_w_1.shape == (n_faces,)
+        dist_w_2 = jnp.where(
+            uwv[:, 2] < 0,
+            self._d_unsigned_point_lineseg(point, self.faces_0, self.faces_1),
+            dist_w_1,
+        )
+        assert isinstance(dist_w_2, Array) and dist_w_2.shape == (n_faces,)
+
+        assert dist_w_2.shape == (n_faces,)
 
         return dist_w_2 * sign
 
-    @staticmethod
     @jax.jit
-    def sign_point_tri(
+    def _sign_point_tri(
+        self,
         points: Float[Array, "3"],
-        face_0: Float[Array, "3"],
-        normal: Float[Array, "3"],
         eps: jdc.Static[float] = 1e-6
     ) -> Float[Array, "1"]:
         # Check if point is on the `normals` direction of the face.
-        direction = points - face_0
-        is_forward = jnp.dot(direction, normal)[None]
-        assert is_forward.shape == (1,)
+        n_faces = self.faces_0.shape[0]
+        direction = points - self.faces_0
+        is_forward = jnp.multiply(direction, self.face_normals).sum(axis=-1)
+        assert is_forward.shape == (n_faces,)
         sign = jnp.where(
             is_forward >= eps,  # i.e., if outside mesh,
-            jnp.full((1,), -1),  # then sdf < 0.
-            jnp.full((1,), 1),
+            jnp.full((n_faces,), -1),  # then sdf < 0.
+            jnp.full((n_faces,), 1),
         )
-        assert sign.shape == (1,)
+        assert sign.shape == (n_faces,)
         return sign
 
-    @staticmethod
     @jax.jit
-    def bary(
+    def _bary(
+        self,
         points: Float[Array, "3"],
-        face_0: Float[Array, "3"],
-        face_1: Float[Array, "3"],
-        face_2: Float[Array, "3"],
-        normal: Float[Array, "3"],
-        area: Float[Array, "1"]
-    ) -> Float[Array, "3"]:
+    ) -> Float[Array, "face 3"]:
         # Reimplementation of pysdf.
-        area_pbc = jnp.dot(normal, (jnp.cross((face_1 - points), (face_2 - points)))) # / area
-        area_pca = jnp.dot(normal, (jnp.cross((face_2 - points), (face_0 - points)))) # / area
+        n_faces = self.faces_0.shape[0]
+        area_pbc = jnp.multiply(self.face_normals, (jnp.cross((self.faces_1 - points), (self.faces_2 - points)))).sum(axis=-1) # / area
+        area_pca = jnp.multiply(self.face_normals, (jnp.cross((self.faces_2 - points), (self.faces_0 - points)))).sum(axis=-1) # / area
         uwv = jnp.stack([area_pbc, area_pca, 1 - area_pbc - area_pca], axis=-1)
-        assert uwv.shape == (3,)
+        assert uwv.shape == (n_faces, 3)
         return uwv
 
-    @staticmethod
     @jax.jit
-    def d_unsigned_point_lineseg(
+    def _d_unsigned_point_lineseg(
+        self,
         point: Float[Array, "3"],
-        a: Float[Array, "3"],
-        b: Float[Array, "3"],
-    ) -> Float[Array, "1"]:
+        a: Float[Array, "segs 3"],
+        b: Float[Array, "segs 3"],
+    ) -> Float[Array, "segs"]:
         # Reimplementation from pysdf.
+        n_segs = a.shape[0]
+        assert a.shape == b.shape
         ap, ab = point - a, b - a
         t = jnp.multiply(ap, ab) / jnp.linalg.norm(ab)**2
-        dist_sq = jnp.linalg.norm(ap - t * ab, axis=-1)[None]
-        assert dist_sq.shape == (1,)
+        dist_sq = jnp.linalg.norm(ap - t * ab, axis=-1)
+        assert dist_sq.shape == (n_segs,)
         return dist_sq
 
     def d_other(self, other: DiffSDF) -> Float[Array, "1"]:
@@ -344,18 +336,18 @@ if __name__ == "__main__":
             jnp.any(sphere_collision.collides_points(position) > 0)
         ).item()
 
-    sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=1, subdivisions=3))
+    sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=1, subdivisions=4))
+    print(sph.vertices.shape)
     
     print("sph init")
     key = jax.random.PRNGKey(0)
     points = jax.random.uniform(key=key, shape=(10000, 3))
-    points = jnp.array([[0.0, 0.0, 0.0]])
+    # points = jnp.array([[2.0, 0.0, 0.0]])
 
     import time
     start = time.time()
     dist = sph.d_points(points)
     print("Time taken:", time.time() - start, "seconds.")
-    print(dist)
 
     start = time.time()
     dist = sph.d_points(points)
