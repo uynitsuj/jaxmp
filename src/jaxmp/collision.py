@@ -15,6 +15,8 @@ class DiffSDF(abc.ABC):
     sdf > 0: inside mesh
     sdf < 0: means outside.
     """
+
+    @jax.jit
     @abc.abstractmethod
     def d_points(self, points: Float[Array, "points 3"]) -> Float[Array, "points"]:
         raise NotImplementedError
@@ -132,7 +134,7 @@ class MeshSDF(DiffSDF):
     faces_2: Float[Array, "face 3"]
 
     face_normals: Float[Array, "face 3"]
-    face_areas: Float[Array, "face 1"]
+    face_areas: Float[Array, "face"]
 
     @staticmethod
     def from_trimesh(mesh: trimesh.Trimesh) -> MeshSDF:
@@ -154,37 +156,36 @@ class MeshSDF(DiffSDF):
         )
 
         face_areas = mesh.area_faces
-        face_areas = face_areas[:, None]
-        assert face_areas.shape == (num_faces, 1)
+        assert face_areas.shape == (num_faces,)
+
+        face_normals = jnp.array(mesh.face_normals)
+        assert jnp.isclose(jnp.linalg.norm(face_normals, axis=-1), 1).all()
 
         return MeshSDF(
             vertices=vertices,
             faces_0=faces_0,
             faces_1=faces_1,
             faces_2=faces_2,
-            face_normals=jnp.array(mesh.face_normals),
+            face_normals=face_normals,
             face_areas=jnp.array(face_areas)
         )
 
+    @jax.jit
     def d_points(self, points: Float[Array, "point 3"]) -> Float[Array, "point"]:
-        """Calculate SDF of point(s) with respect to mesh."""
+        """Calculate SDF of point(s) with respect to mesh.
+        Not sure if this is good to JIT (# of points may vary) but it's much faster if constant."""
         n_points = points.shape[0]
 
-        def d_points_fun(i: int, d_faces_points: Array) -> Array:
+        def d_points_fun(i: int) -> Array:
             d_face_points = self.d_point_tris(
                 points[i],
             )
+            # jax.debug.print("{}", d_face_points)
             min_dist_idx = jnp.argmin(jnp.abs(d_face_points))
             min_dist = d_face_points[min_dist_idx]
-            return d_faces_points.at[i].set(min_dist)
+            return min_dist
 
-        d_points = jax.lax.fori_loop(
-            lower=0, 
-            upper=n_points,
-            body_fun=d_points_fun,
-            init_val=jnp.zeros((n_points,))
-        )
-        assert d_points.shape == (n_points,)
+        d_points = jax.vmap(d_points_fun)(jnp.arange(n_points))  # type: ignore
 
         return d_points
 
@@ -197,6 +198,7 @@ class MeshSDF(DiffSDF):
         n_faces = self.faces_0.shape[0]
 
         uwv = self._bary(point)
+        # jax.debug.print("{}", uwv)
 
         dist = jnp.linalg.norm(
             (
@@ -212,20 +214,21 @@ class MeshSDF(DiffSDF):
         sign = self._sign_point_tri(point)
         assert sign.shape == (n_faces,)
 
+        eps = -1e-6
         dist_w_0 = jnp.where(
-            uwv[:, 0] < 0,
+            uwv[:, 0] < eps,
             self._d_unsigned_point_lineseg(point, self.faces_1, self.faces_2),
             dist,
         )
         assert isinstance(dist_w_0, Array) and dist_w_0.shape == (n_faces,)
         dist_w_1 = jnp.where(
-            uwv[:, 1] < 0,
+            uwv[:, 1] < eps,
             self._d_unsigned_point_lineseg(point, self.faces_0, self.faces_2),
             dist_w_0
         )
         assert isinstance(dist_w_1, Array) and dist_w_1.shape == (n_faces,)
         dist_w_2 = jnp.where(
-            uwv[:, 2] < 0,
+            uwv[:, 2] < eps,
             self._d_unsigned_point_lineseg(point, self.faces_0, self.faces_1),
             dist_w_1,
         )
@@ -261,10 +264,14 @@ class MeshSDF(DiffSDF):
     ) -> Float[Array, "face 3"]:
         # Reimplementation of pysdf.
         n_faces = self.faces_0.shape[0]
-        area_pbc = jnp.multiply(self.face_normals, (jnp.cross((self.faces_1 - points), (self.faces_2 - points)))).sum(axis=-1) # / area
-        area_pca = jnp.multiply(self.face_normals, (jnp.cross((self.faces_2 - points), (self.faces_0 - points)))).sum(axis=-1) # / area
+        area_pbc = (
+            jnp.multiply(self.face_normals, (jnp.cross((self.faces_1 - points), (self.faces_2 - points))),).sum(axis=-1) / 2
+        ) / self.face_areas
+        area_pca = (
+            jnp.multiply(self.face_normals, (jnp.cross((self.faces_2 - points), (self.faces_0 - points))),).sum(axis=-1) / 2
+        ) / self.face_areas
         uwv = jnp.stack([area_pbc, area_pca, 1 - area_pbc - area_pca], axis=-1)
-        assert uwv.shape == (n_faces, 3)
+        assert uwv.shape == (n_faces, 3), uwv.shape
         return uwv
 
     @jax.jit
@@ -312,45 +319,48 @@ def test_JaxSphereSDF():
 
 
 if __name__ == "__main__":
-    centers = jax.random.uniform(jax.random.PRNGKey(0), (10, 3), minval=-0.5, maxval=0.5)
-    radii = jax.random.uniform(jax.random.PRNGKey(1), (10,), minval=0.1, maxval=0.5)
-
-    sphere_collision = SphereSDF(centers, radii)
-    test_JaxSphereSDF()
-
     import viser
     server = viser.ViserServer()
-    tf_handle = server.scene.add_transform_controls("tf")
-    contains_gui = server.gui.add_checkbox("contains", initial_value=False, disabled=True)
 
-    import trimesh.creation
-    spheres_list = []
-    for i, (center, radius) in enumerate(zip(centers, radii)):
-        sphere_mesh = trimesh.creation.icosphere(radius=radius)
-        spheres_list.append(server.scene.add_mesh_trimesh(f"sphere_{i}", sphere_mesh, position=center))
+    centers = jax.random.uniform(jax.random.PRNGKey(0), (10, 3), minval=-0.5, maxval=0.5)
+    radii = jax.random.uniform(jax.random.PRNGKey(1), (10,), minval=0.1, maxval=0.5)
+    # sphere_collision = SphereSDF(centers, radii)
+    # test_JaxSphereSDF()
 
-    @tf_handle.on_update
-    def _(_):
-        position = jnp.array(tf_handle.position.reshape(-1, 3))
-        contains_gui.value = onp.array(
-            jnp.any(sphere_collision.collides_points(position) > 0)
-        ).item()
+    # tf_handle = server.scene.add_transform_controls("tf")
+    # contains_gui = server.gui.add_checkbox("contains", initial_value=False, disabled=True)
 
-    sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=1, subdivisions=4))
+    # import trimesh.creation
+    # spheres_list = []
+    # for i, (center, radius) in enumerate(zip(centers, radii)):
+    #     sphere_mesh = trimesh.creation.icosphere(radius=radius)
+    #     spheres_list.append(server.scene.add_mesh_trimesh(f"sphere_{i}", sphere_mesh, position=center))
+
+    # @tf_handle.on_update
+    # def _(_):
+    #     position = jnp.array(tf_handle.position.reshape(-1, 3))
+    #     contains_gui.value = onp.array(
+    #         jnp.any(sphere_collision.collides_points(position) > 0)
+    #     ).item()
+
+    # sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=0.01, subdivisions=4))
+    sph = MeshSDF.from_trimesh(trimesh.creation.box(extents=[2.0]*3))
     print(sph.vertices.shape)
     
     print("sph init")
     key = jax.random.PRNGKey(0)
-    points = jax.random.uniform(key=key, shape=(10000, 3))
-    # points = jnp.array([[2.0, 0.0, 0.0]])
+    # points = jax.random.uniform(key=key, shape=(1000, 3))
+    points = jnp.array([[0.0, 0.0, 0.0]])
 
     import time
     start = time.time()
     dist = sph.d_points(points)
+    print(dist)
     print("Time taken:", time.time() - start, "seconds.")
 
     start = time.time()
     dist = sph.d_points(points)
+    print(dist)
     print("Time taken:", time.time() - start, "seconds.")
 
     breakpoint()
