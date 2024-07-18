@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import trimesh
+import warnings
 
 import jax
 import jax_dataclasses as jdc
@@ -12,13 +13,14 @@ from jaxtyping import Float
 
 class DiffSDF(abc.ABC):
     """
-    sdf > 0: inside mesh
-    sdf < 0: means outside.
+    Differentiable Signed Distance Function (SDF) interface.
+    - sdf > 0: inside mesh.
+    - sdf < 0: outside mesh.
     """
 
     @jax.jit
     @abc.abstractmethod
-    def d_points(self, points: Float[Array, "points 3"]) -> Float[Array, "points"]:
+    def d_points(self, points: Float[Array, "point 3"]) -> Float[Array, "point"]:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -126,6 +128,7 @@ class SphereSDF:
 
 @jdc.pytree_dataclass
 class MeshSDF(DiffSDF):
+    # ... generally works, but the signs are incorrect...
     vertices: Float[Array, "vert 3"]
 
     # Three points per face, 3D points. In winding order.
@@ -138,7 +141,8 @@ class MeshSDF(DiffSDF):
 
     @staticmethod
     def from_trimesh(mesh: trimesh.Trimesh) -> MeshSDF:
-        assert mesh.is_watertight
+        if not mesh.is_watertight:
+            warnings.warn("Mesh is not watertight, may not be accurate.")
 
         # Track faces with the vertex locations.
         # Combine the face + vertices into a single tensor.
@@ -159,7 +163,6 @@ class MeshSDF(DiffSDF):
         assert face_areas.shape == (num_faces,)
 
         face_normals = jnp.array(mesh.face_normals)
-        assert jnp.isclose(jnp.linalg.norm(face_normals, axis=-1), 1).all()
 
         return MeshSDF(
             vertices=vertices,
@@ -180,7 +183,6 @@ class MeshSDF(DiffSDF):
             d_face_points = self.d_point_tris(
                 points[i],
             )
-            # jax.debug.print("{}", d_face_points)
             min_dist_idx = jnp.argmin(jnp.abs(d_face_points))
             min_dist = d_face_points[min_dist_idx]
             return min_dist
@@ -198,7 +200,6 @@ class MeshSDF(DiffSDF):
         n_faces = self.faces_0.shape[0]
 
         uwv = self._bary(point)
-        # jax.debug.print("{}", uwv)
 
         dist = jnp.linalg.norm(
             (
@@ -214,7 +215,7 @@ class MeshSDF(DiffSDF):
         sign = self._sign_point_tri(point)
         assert sign.shape == (n_faces,)
 
-        eps = -1e-6
+        eps = -1e-12
         dist_w_0 = jnp.where(
             uwv[:, 0] < eps,
             self._d_unsigned_point_lineseg(point, self.faces_1, self.faces_2),
@@ -246,7 +247,7 @@ class MeshSDF(DiffSDF):
     ) -> Float[Array, "1"]:
         # Check if point is on the `normals` direction of the face.
         n_faces = self.faces_0.shape[0]
-        direction = points - self.faces_0
+        direction = (points - self.faces_0) / (jnp.linalg.norm(points - self.faces_0, axis=-1) + eps)[:, None]
         is_forward = jnp.multiply(direction, self.face_normals).sum(axis=-1)
         assert is_forward.shape == (n_faces,)
         sign = jnp.where(
@@ -263,13 +264,14 @@ class MeshSDF(DiffSDF):
         points: Float[Array, "3"],
     ) -> Float[Array, "face 3"]:
         # Reimplementation of pysdf.
+        eps = 1e-6
         n_faces = self.faces_0.shape[0]
         area_pbc = (
             jnp.multiply(self.face_normals, (jnp.cross((self.faces_1 - points), (self.faces_2 - points))),).sum(axis=-1) / 2
-        ) / self.face_areas
+        ) / (self.face_areas + eps)
         area_pca = (
             jnp.multiply(self.face_normals, (jnp.cross((self.faces_2 - points), (self.faces_0 - points))),).sum(axis=-1) / 2
-        ) / self.face_areas
+        ) / (self.face_areas + eps)
         uwv = jnp.stack([area_pbc, area_pca, 1 - area_pbc - area_pca], axis=-1)
         assert uwv.shape == (n_faces, 3), uwv.shape
         return uwv
@@ -343,14 +345,14 @@ if __name__ == "__main__":
     #         jnp.any(sphere_collision.collides_points(position) > 0)
     #     ).item()
 
-    # sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=0.01, subdivisions=4))
-    sph = MeshSDF.from_trimesh(trimesh.creation.box(extents=[2.0]*3))
+    sph = MeshSDF.from_trimesh(trimesh.creation.icosphere(radius=0.01, subdivisions=4))
+    # sph = MeshSDF.from_trimesh(trimesh.creation.box(extents=[2.0]*3))
     print(sph.vertices.shape)
     
     print("sph init")
     key = jax.random.PRNGKey(0)
-    # points = jax.random.uniform(key=key, shape=(1000, 3))
-    points = jnp.array([[0.0, 0.0, 0.0]])
+    points = jax.random.uniform(key=key, shape=(1000, 3))
+    # points = jnp.array([[0.0, 0.0, 0.0]])
 
     import time
     start = time.time()
