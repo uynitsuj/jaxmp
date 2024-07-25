@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import jax
 import jax_dataclasses as jdc
 import jaxlie
@@ -17,6 +19,7 @@ from typing import Dict, List, Tuple, Optional, cast
 import tyro
 
 from jaxmp.collision import SphereSDF, MeshSDF
+from jaxmp.collbody import Spheres
 
 # TODO self-collision!
 
@@ -210,45 +213,63 @@ class JaxUrdf:
 @jdc.pytree_dataclass
 class JaxUrdfwithSphereCollision(JaxUrdf):
     """A differentiable, collision-aware robot kinematics model."""
-    num_spheres: jdc.Static[int]
-    coll_link_idx: Int[Array, "spheres"]
-    coll_link_centers: Float[Array, "spheres 3"]
-    coll_link_radii: Float[Array, "spheres"]
+    _coll_link_idx: Int[Array, "spheres"]
+    _spheres: Spheres
 
     @staticmethod
-    def from_urdf_and_coll(
+    def from_urdf(
         urdf: yourdfpy.URDF,
-        coll_dict: Dict[str, List[Dict[str, List]]]
     ):
         # scrape the collision data.
-        idx, centers, radii = [], [], []
+        coll_link_idx = []
+        coll_link_spheres: list[Spheres] = []
 
-        if len(coll_dict) == 0:
-            raise UserWarning("No collision data was loaded! Maybe you forgot to load the collision geometry?")
+        # First, create a urdf with the collision data!
+        urdf = yourdfpy.URDF(
+            robot=urdf.robot,
+            filename_handler=urdf._filename_handler,
+            load_collision_meshes=True,
+        )
 
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
-            if joint.child not in coll_dict:
+            curr_link = joint.child
+            coll_mesh_list = urdf.link_map[curr_link].collisions
+            if len(coll_mesh_list) == 0:
                 continue
+            assert len(coll_mesh_list) == 1, coll_mesh_list
+            print(f"Found collision mesh for {curr_link}.")
 
-            list_of_spheres = coll_dict[joint.child]
-            for sphere in list_of_spheres:
-                idx.append(joint_idx)
-                centers.append(sphere['center'])
-                radii.append(sphere['radius'])
+            # Handle different geometry types.
+            coll_mesh: Optional[trimesh.Trimesh] = None
+            geom = coll_mesh_list[0].geometry
+            if geom.box is not None:
+                coll_mesh = trimesh.creation.box(geom.box.size)
+            elif geom.cylinder is not None:
+                coll_mesh = trimesh.creation.cylinder(geom.cylinder.radius, geom.cylinder.length)
+            elif geom.sphere is not None:
+                coll_mesh = trimesh.creation.icosphere(radius=geom.sphere.radius)
+            elif geom.mesh is not None:
+                coll_mesh = cast(
+                    trimesh.Trimesh,
+                    trimesh.load(urdf._filename_handler(geom.mesh.filename), force="mesh"),
+                )
+                coll_mesh.fix_normals()
 
-        if len(idx) == 0:
-            raise UserWarning("No collision data was found! Maybe you misnamed the collision data?")
+            if coll_mesh is None:
+                raise ValueError(f"No collision mesh found for {curr_link}!")
 
-        idx = jnp.array(idx)
-        centers = jnp.array(centers)
-        radii = jnp.array(radii)
-        num_spheres = centers.shape[0]
+            assert isinstance(coll_mesh, trimesh.Trimesh), type(coll_mesh)
+            spheres = Spheres.from_trimesh(coll_mesh)
+            coll_link_idx.append([joint_idx] * spheres.n_pts)
+            coll_link_spheres.append(spheres)
 
-        assert (
-            idx.shape == (num_spheres,) and
-            centers.shape == (num_spheres, 3) and
-            radii.shape == (num_spheres,)
+        coll_link_idx = jnp.array(coll_link_idx).flatten()
+        spheres = Spheres(
+            n_pts=sum(s.n_pts for s in coll_link_spheres),
+            centers=jnp.concatenate([s.centers for s in coll_link_spheres]),
+            radii=jnp.concatenate([s.radii for s in coll_link_spheres]),
         )
+        assert coll_link_idx.shape[0] == spheres.n_pts
 
         jax_urdf = JaxUrdf.from_urdf(urdf)
         return JaxUrdfwithSphereCollision(
@@ -262,59 +283,46 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             limits_lower=jnp.array(jax_urdf.limits_lower),
             limits_upper=jnp.array(jax_urdf.limits_upper),
             parent_indices=jnp.array(jax_urdf.parent_indices),
-            num_spheres=num_spheres,
-            coll_link_idx=idx,
-            coll_link_centers=centers,
-            coll_link_radii=radii,
+            _coll_link_idx=coll_link_idx,
+            _spheres=spheres,
         )
 
     @jdc.jit
     def d_world(
         self,
         cfg: Float[Array, "num_act_joints"],
-        other: SphereSDF
-    ) -> Float[Array, "num_joints"]:
+        other: Spheres
+    ) -> Float[Array, "1"]:
         """Check if the robot collides with the world, in the provided configuration.
         Get the max signed distance field (sdf) for each joint."""
-        centers, radii = self.as_spheres(cfg)
-        coll = SphereSDF(centers=centers, radii=radii)
-        max_sdf = coll.collides_other(other)
-
-        link_idx_as_mask = jnp.arange(self.num_joints)[:, None] == self.coll_link_idx[None]
-        assert link_idx_as_mask.shape == (self.num_joints, self.num_spheres)
-        assert max_sdf.shape == (self.num_spheres,)
-        max_sdf_per_joint = jnp.max(
-            jnp.where(
-                link_idx_as_mask,
-                jnp.broadcast_to(max_sdf, (self.num_joints, self.num_spheres)),
-                -jnp.inf,
-            ),
-            axis=-1,
-        )
-
-        assert max_sdf_per_joint.shape == (self.num_joints,)
-        return max_sdf_per_joint
+        self_spheres = self.spheres(cfg)
+        dist = Spheres.dist(self_spheres, other)
+        assert len(dist.shape) == 0
+        return dist
 
     @jdc.jit
-    def as_spheres(
+    def spheres(
         self,
         cfg: Float[Array, "*batch num_act_joints"]
-    ) -> Tuple[Float[Array, "*batch num_spheres 3"], Float[Array, "*batch num_spheres"]]:
+    ) -> Spheres:
         """Get the spheres in the world frame, in the provided configuration."""
         batch_size = cfg.shape[:-1]
-        num_spheres = self.coll_link_centers.shape[0]
+        num_spheres = self._spheres.n_pts
         Ts_world_joint = self.forward_kinematics(cfg)
         assert Ts_world_joint.shape == (*batch_size, self.num_joints, 7)
 
-        centers = jaxlie.SE3.from_translation(self.coll_link_centers)
+        centers = jaxlie.SE3.from_translation(self._spheres.centers)
         centers_transformed = (
-            jaxlie.SE3(Ts_world_joint[..., self.coll_link_idx, :])
+            jaxlie.SE3(Ts_world_joint[..., self._coll_link_idx, :])
             @ centers
         ).translation()
 
         assert centers_transformed.shape == (*batch_size, num_spheres, 3)
-        assert self.coll_link_radii.shape == (num_spheres,)
-        return centers_transformed, self.coll_link_radii
+        return Spheres(
+            n_pts=num_spheres,
+            centers=centers_transformed,
+            radii=self._spheres.radii,
+        )
 
 
 @jdc.pytree_dataclass
@@ -419,24 +427,15 @@ class JaxUrdfwithMeshCollision(JaxUrdf):
 def main():
     """Small test script to visualize the Yumi robot, and the collision spheres, in viser."""
     from pathlib import Path
-    import yaml
     import viser
     import viser.extras
     import trimesh.creation
     import time
 
-    # jax_urdf = JaxUrdfwithSphereCollision.from_urdf_and_coll(yourdf, yumi_coll)
     from robot_descriptions.loaders.yourdfpy import load_robot_description
     # yourdf = load_robot_description("yumi_description")
     yourdf = load_robot_description("ur5_description")
-    # hackily add the collisiondata for yourdf.
-    yourdf._scene_collision = yourdf._create_scene(
-        use_collision_geometry=True,
-        load_geometry=True,
-        force_mesh=True,
-        force_single_geometry_per_link=True,
-    )
-    jax_urdf = JaxUrdfwithMeshCollision.from_urdf(yourdf)
+    jax_urdf = JaxUrdfwithSphereCollision.from_urdf(yourdf)
 
     server = viser.ViserServer()
 
@@ -451,10 +450,17 @@ def main():
     tf_item = server.gui.add_number("point", initial_value=0.0, step=0.001, disabled=True)
     coll_item = server.gui.add_checkbox("colliding", initial_value=False, disabled=True)
 
+    server.scene.add_mesh_trimesh(
+        "spheres",
+        jax_urdf.spheres(jnp.array(yumi_rest)).to_trimesh(),
+    )
+
     while True:
         position = jnp.array(tf.position)[None, :]
-        dist = jax_urdf.d_world(jnp.array(yumi_rest), position)
-        assert dist.shape == (1,)
+        dist = jax_urdf.d_world(
+            jnp.array(yumi_rest),
+            Spheres.from_points(position),
+        )
         tf_item.value = dist.item()
         coll_item.value = dist.item() > 0.0
         time.sleep(0.01)
