@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, cast
 import warnings
 
 import trimesh
+import skeletor as sk
 
 import numpy as onp
 import jax_dataclasses as jdc
 from jax.experimental.sparse import BCOO, bcoo_dot_general_sampled
+import jax
 from jax import Array
 from jaxtyping import Float, PyTree
 import jax.numpy as jnp
@@ -23,13 +25,13 @@ class Spheres:
     radii: Float[Array, "sphere"]
 
     @staticmethod
-    def from_trimesh(
+    def from_voxels(
         mesh: trimesh.Trimesh,
         n_pts: int = 20,
         volume: bool = True
     ) -> Spheres:
         """
-        Create a sphere-based collision body from a mesh.
+        Create a sphere-based collision body from a mesh, using voxels.
 
         Args:
             mesh: The input mesh.
@@ -110,6 +112,62 @@ class Spheres:
         return Spheres(num_points, voxel_points, voxel_radii)
 
     @staticmethod
+    def from_skeleton(
+        mesh: trimesh.Trimesh,
+        n_pts: int = 20,
+    ) -> Spheres:
+        """
+        Create a sphere-based collision body from a mesh, using a skeleton.
+        """
+        # Create a skeleton from the mesh.
+        mesh = cast(
+            trimesh.Trimesh,
+            mesh.subdivide_to_size(0.01)
+        )
+        mesh = cast(
+            trimesh.Trimesh,
+            sk.pre.fix_mesh(mesh)
+        )
+        assert isinstance(mesh, trimesh.Trimesh)
+        skel = sk.skeletonize.by_wavefront(mesh, waves=1, progress=False)
+        vert, edges = jnp.array(skel.vertices), jnp.array(skel.edges)
+
+        # Sample points on the skeleton.
+        rand_edge_idx = jax.random.uniform(jax.random.PRNGKey(0), (10*n_pts,),)
+        rand_idx = jax.random.uniform(jax.random.PRNGKey(0), (10*n_pts,),)
+        edge_lengths = jax.vmap(jnp.linalg.norm)(vert[edges[:, 0]] - vert[edges[:, 1]])
+        edge_cumsum = jnp.cumsum(edge_lengths)
+        edge_cumsum = edge_cumsum / edge_cumsum[-1]
+
+        edge_idx = jnp.searchsorted(edge_cumsum, rand_edge_idx)
+        centers = (
+            vert[edges[edge_idx, 0]] 
+            + rand_idx[:, None] * (vert[edges[edge_idx, 1]] - vert[edges[edge_idx, 0]])
+        )
+
+        # radii = jnp.full(centers.shape[0], 0.005)
+        # ... and create spheres from them!
+        pr = trimesh.proximity.ProximityQuery(mesh)
+        dist = pr.signed_distance(centers)
+        idx = (dist > 1e-5)  # don't want the spheres to be too small.
+        centers = centers[idx]
+        radii = dist[idx]
+
+        # Sort the spheres by radius, return the biggest ones.
+        idx = jnp.argsort(radii, descending=True)[:n_pts]
+        centers = centers[idx]
+        radii = radii[idx]
+
+        n_pts = centers.shape[0]
+        assert n_pts > 0
+
+        return Spheres(
+            n_pts,
+            jnp.array(centers),
+            jnp.array(radii)
+        )
+
+    @staticmethod
     def from_points(
         points: Float[Array, "point 3"],
         radius: Optional[float] = None,
@@ -150,7 +208,8 @@ class Spheres:
 if __name__ == "__main__":
     # mesh = trimesh.creation.box((1, 1, 1))
     mesh = trimesh.creation.icosphere(radius=1)
-    spheres = Spheres.from_trimesh(mesh, 100)
+    # spheres = Spheres.from_trimesh(mesh, 100)
+    spheres = Spheres.from_skeleton(mesh, 100)
 
     import viser
     server = viser.ViserServer()

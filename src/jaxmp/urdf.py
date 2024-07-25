@@ -259,17 +259,20 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
                 raise ValueError(f"No collision mesh found for {curr_link}!")
 
             assert isinstance(coll_mesh, trimesh.Trimesh), type(coll_mesh)
-            spheres = Spheres.from_trimesh(coll_mesh)
+            # spheres = Spheres.from_skeleton(coll_mesh)
+            spheres = Spheres.from_voxels(coll_mesh)
             coll_link_idx.append([joint_idx] * spheres.n_pts)
             coll_link_spheres.append(spheres)
 
-        coll_link_idx = jnp.array(coll_link_idx).flatten()
+        coll_link_idx = jnp.array(sum(coll_link_idx, []))
         spheres = Spheres(
             n_pts=sum(s.n_pts for s in coll_link_spheres),
             centers=jnp.concatenate([s.centers for s in coll_link_spheres]),
             radii=jnp.concatenate([s.radii for s in coll_link_spheres]),
         )
         assert coll_link_idx.shape[0] == spheres.n_pts
+
+        print(f"Found {spheres.n_pts} collision spheres.")
 
         jax_urdf = JaxUrdf.from_urdf(urdf)
         return JaxUrdfwithSphereCollision(
@@ -433,8 +436,10 @@ def main():
     import time
 
     from robot_descriptions.loaders.yourdfpy import load_robot_description
-    # yourdf = load_robot_description("yumi_description")
+    yourdf = load_robot_description("yumi_description")
+    yumi_rest = onp.array([0.0] * 16)
     yourdf = load_robot_description("ur5_description")
+    yumi_rest = onp.array([0.0] * 6)
     jax_urdf = JaxUrdfwithSphereCollision.from_urdf(yourdf)
 
     server = viser.ViserServer()
@@ -442,8 +447,6 @@ def main():
     urdf = viser.extras.ViserUrdf(
         server, yourdf, root_node_name="/urdf"
     )
-    # yumi_rest = onp.array([0.0] * 16)
-    yumi_rest = onp.array([0.0] * 6)
     urdf.update_cfg(yumi_rest)
 
     tf = server.scene.add_transform_controls("point", scale=0.5)
