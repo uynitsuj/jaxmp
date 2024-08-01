@@ -23,6 +23,7 @@ class Spheres:
     n_pts: jdc.Static[int]
     centers: Float[Array, "sphere 3"]
     radii: Float[Array, "sphere"]
+    metadata: Optional[Float[Array, "sphere"]] = None
 
     @staticmethod
     def from_voxels(
@@ -182,16 +183,22 @@ class Spheres:
     def dist(
         sph_0: Spheres,
         sph_1: Spheres,
+        include: Optional[Float[Array, "sph_0 sph_1"]] = None,
     ) -> Float[Array, "1"]:
         """Return distance to another set of spheres. sdf > 0 means collision."""
         n_spheres_sph_0 = sph_0.centers.shape[0]
         n_spheres_sph_1 = sph_1.centers.shape[0]
 
-        dist = jnp.sum((sph_0.centers[:, None] - sph_1.centers[None]) ** 2, axis=-1)
+        if include is not None:
+            assert include.shape == (n_spheres_sph_0, n_spheres_sph_1)
+        else:
+            include = jnp.ones((n_spheres_sph_0, n_spheres_sph_1))
+
+        dist = jnp.sum(((sph_0.centers[:, None] - sph_1.centers[None]) ** 2), axis=-1)
         assert dist.shape == (n_spheres_sph_0, n_spheres_sph_1)
         sdf = (sph_0.radii[:, None] + sph_1.radii[None]) - jnp.sqrt(dist)
 
-        max_sdf = jnp.max(sdf)
+        max_sdf = jnp.max(sdf * include)
         return max_sdf
 
     def to_trimesh(self) -> trimesh.Trimesh:

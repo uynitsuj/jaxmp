@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import jax
+import jax.experimental
 import jax_dataclasses as jdc
 import jaxlie
 import numpy as onp
@@ -158,7 +159,7 @@ class JaxUrdf:
         cfg: Float[Array, "*batch num_act_joints"],
     ) -> Float[Array, "*batch num_joints 7"]:
         batch_axes = cfg.shape[:-1]
-        assert cfg.shape == (*batch_axes, self.num_actuated_joints)
+        assert cfg.shape == (*batch_axes, self.num_actuated_joints), f"""Got {cfg.shape}, expected {(*batch_axes, self.num_actuated_joints)}"""
 
         Ts_joint_child = jaxlie.SE3.exp(self.joint_twists * cfg[..., None]).wxyz_xyz
         assert Ts_joint_child.shape == (*batch_axes, self.num_actuated_joints, 7)
@@ -269,6 +270,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             n_pts=sum(s.n_pts for s in coll_link_spheres),
             centers=jnp.concatenate([s.centers for s in coll_link_spheres]),
             radii=jnp.concatenate([s.radii for s in coll_link_spheres]),
+            metadata=jnp.array(coll_link_idx),
         )
         assert coll_link_idx.shape[0] == spheres.n_pts
 
@@ -303,6 +305,27 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         assert len(dist.shape) == 0
         return dist
 
+    def d_self(
+        self,
+        cfg: Float[Array, "num_act_joints"],
+    ) -> Float[Array, "1"]:
+        """Check if the robot collides with itself, in the provided configuration.
+        Get the max signed distance field (sdf) for each joint."""
+        self_spheres = self.spheres(cfg)
+        assert self_spheres.metadata is not None
+        # include = (self_spheres.metadata[:, None] != self_spheres.metadata[None, :]).astype(jnp.float32)
+        include = (
+            jnp.abs(self_spheres.metadata[:, None] - self_spheres.metadata[None, :]) > 1
+        ).astype(jnp.float32)
+        # include = jnp.zeros_like(include)
+        dist = Spheres.dist(
+            self_spheres,
+            self_spheres,
+            include=include,
+        )
+        assert len(dist.shape) == 0
+        return dist
+
     @jdc.jit
     def spheres(
         self,
@@ -325,6 +348,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             n_pts=num_spheres,
             centers=centers_transformed,
             radii=self._spheres.radii,
+            metadata=self._spheres.metadata,
         )
 
 
