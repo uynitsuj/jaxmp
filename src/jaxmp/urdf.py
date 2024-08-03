@@ -22,14 +22,15 @@ import tyro
 from jaxmp.collision import SphereSDF, MeshSDF
 from jaxmp.collbody import Spheres
 
-# TODO self-collision!
-
+# Spheres: Can also do OBB, then fit spheres over it. -- https://arxiv.org/pdf/2407.02363
+# define allowed collision matrix
 
 @jdc.pytree_dataclass
 class JaxUrdf:
     """A differentiable robot kinematics model."""
 
     num_joints: jdc.Static[int]
+    num_links: jdc.Static[int]
     joint_names: jdc.Static[Tuple[str]]
     """List of joint names, in order."""
 
@@ -130,6 +131,7 @@ class JaxUrdf:
         joint_names = tuple[str](joint_names)
 
         num_joints = len(urdf.joint_map)
+        num_links = len(urdf.link_map)
         num_actuated_joints = len(urdf.actuated_joints)
 
         assert idx_actuated_joint.shape == (len(urdf.joint_map),)
@@ -142,6 +144,7 @@ class JaxUrdf:
 
         return JaxUrdf(
             num_joints=num_joints,
+            num_links=num_links,
             joint_names=joint_names,
             num_actuated_joints=num_actuated_joints,
             idx_actuated_joint=idx_actuated_joint,
@@ -261,7 +264,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
 
             assert isinstance(coll_mesh, trimesh.Trimesh), type(coll_mesh)
             # spheres = Spheres.from_skeleton(coll_mesh)
-            spheres = Spheres.from_voxels(coll_mesh)
+            spheres = Spheres.from_voxels(coll_mesh, n_pts=10)
             coll_link_idx.append([joint_idx] * spheres.n_pts)
             coll_link_spheres.append(spheres)
 
@@ -279,6 +282,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         jax_urdf = JaxUrdf.from_urdf(urdf)
         return JaxUrdfwithSphereCollision(
             num_joints=len(jax_urdf.parent_indices),
+            num_links=jax_urdf.num_links,
             joint_names=jax_urdf.joint_names,
             num_actuated_joints=jax_urdf.num_actuated_joints,
             is_actuated=jax_urdf.is_actuated,
@@ -297,33 +301,39 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         self,
         cfg: Float[Array, "num_act_joints"],
         other: Spheres
-    ) -> Float[Array, "1"]:
+    ) -> Float[Array, "num_spheres"]:
         """Check if the robot collides with the world, in the provided configuration.
         Get the max signed distance field (sdf) for each joint."""
         self_spheres = self.spheres(cfg)
+        assert self_spheres.metadata is not None
         dist = Spheres.dist(self_spheres, other)
-        assert len(dist.shape) == 0
+        dist = dist.max(axis=1)
+        assert dist.shape == (self_spheres.n_pts,)
         return dist
 
     def d_self(
         self,
         cfg: Float[Array, "num_act_joints"],
-    ) -> Float[Array, "1"]:
+    ) -> Float[Array, "num_links"]:
         """Check if the robot collides with itself, in the provided configuration.
-        Get the max signed distance field (sdf) for each joint."""
+        Get the max signed distance field (sdf) for each joint. sdf > 0 means collision."""
         self_spheres = self.spheres(cfg)
         assert self_spheres.metadata is not None
         # include = (self_spheres.metadata[:, None] != self_spheres.metadata[None, :]).astype(jnp.float32)
         include = (
-            jnp.abs(self_spheres.metadata[:, None] - self_spheres.metadata[None, :]) > 1
-        ).astype(jnp.float32)
-        # include = jnp.zeros_like(include)
+            jnp.abs(self_spheres.metadata[:, None] - self_spheres.metadata[None, :]) >= 5
+        ).astype(jnp.float32)  # jank ACM approximation i.e., only exclude adjacent links.
         dist = Spheres.dist(
             self_spheres,
             self_spheres,
             include=include,
         )
-        assert len(dist.shape) == 0
+        # dist = jnp.triu(dist, k=1)
+        # dist = dist.max(axis=1)
+        # assert dist.shape == (self_spheres.n_pts,)
+        # breakpoint()
+        # dist = jax.ops.segment_sum(dist, self_spheres.metadata)
+        # assert dist.shape == (self.num_links,)
         return dist
 
     @jdc.jit
@@ -406,6 +416,7 @@ class JaxUrdfwithMeshCollision(JaxUrdf):
 
         return JaxUrdfwithMeshCollision(
             num_joints=len(jax_urdf.parent_indices),
+            num_links=jax_urdf.num_links,
             joint_names=jax_urdf.joint_names,
             num_actuated_joints=jax_urdf.num_actuated_joints,
             is_actuated=jax_urdf.is_actuated,

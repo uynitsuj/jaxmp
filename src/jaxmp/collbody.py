@@ -184,7 +184,7 @@ class Spheres:
         sph_0: Spheres,
         sph_1: Spheres,
         include: Optional[Float[Array, "sph_0 sph_1"]] = None,
-    ) -> Float[Array, "1"]:
+    ) -> Float[Array, "sph_0 sph_1"]:
         """Return distance to another set of spheres. sdf > 0 means collision."""
         n_spheres_sph_0 = sph_0.centers.shape[0]
         n_spheres_sph_1 = sph_1.centers.shape[0]
@@ -194,12 +194,13 @@ class Spheres:
         else:
             include = jnp.ones((n_spheres_sph_0, n_spheres_sph_1))
 
-        dist = jnp.sum(((sph_0.centers[:, None] - sph_1.centers[None]) ** 2), axis=-1)
-        assert dist.shape == (n_spheres_sph_0, n_spheres_sph_1)
-        sdf = (sph_0.radii[:, None] + sph_1.radii[None]) - jnp.sqrt(dist)
+        dist = jnp.linalg.norm(sph_0.centers[:, None] - sph_1.centers[None] + 1e-7, axis=-1)
+        sdf = (sph_0.radii[:, None] + sph_1.radii[None]) - dist
+        sdf = sdf * include
+        sdf = sdf[jnp.triu_indices(n_spheres_sph_0, k=1)].flatten()
 
-        max_sdf = jnp.max(sdf * include)
-        return max_sdf
+        # assert sdf.shape == (n_spheres_sph_0, n_spheres_sph_1)
+        return sdf
 
     def to_trimesh(self) -> trimesh.Trimesh:
         """Convert the spheres to a Trimesh object."""

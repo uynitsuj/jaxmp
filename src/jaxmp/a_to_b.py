@@ -28,9 +28,8 @@ def main():
     import viser.extras
 
     from robot_descriptions.loaders.yourdfpy import load_robot_description
-    yourdf = load_robot_description("yumi_description")
-    # yourdf = load_robot_description("ur5_description")
-    # yourdf = load_robot_description("allegro_hand_description")
+    # yourdf = load_robot_description("yumi_description")
+    yourdf = load_robot_description("ur5_description")
 
     rest_pose = onp.array([0.0] * yourdf.num_dofs)
     jax_urdf = JaxUrdfwithSphereCollision.from_urdf(yourdf)
@@ -65,22 +64,14 @@ def main():
         return loss_fn
 
     pose_vars = [RobotVar(id=0)]
+
     target_handle = server.scene.add_transform_controls("target", scale=0.2)
     calc_handle = server.scene.add_frame("calc", axes_length=0.1, axes_radius=0.01)
 
     curr_joint = server.gui.add_dropdown("target_joint", jax_urdf.joint_names)
-    # curr_joint.value = "ee_fixed_joint"
-    curr_joint.value = "gripper_r_joint"
 
-    self_coll_value = server.gui.add_number("self_coll", 0.001)
-    
-    sph = jax_urdf.spheres(rest_pose)
-    dist = Spheres.dist(sph, sph)
-
-    # ball = trimesh.creation.icosphere(radius=0.1)
-    # ball.vertices += onp.array([0.4, 0.0, 0.2])
-    # server.scene.add_mesh_trimesh("ball", ball)
-    # ball_sphere = Spheres(1, jnp.array([[0.4, 0.0, 0.2]]), jnp.array([0.1]))
+    ball_sphere = Spheres.from_points(jax.random.uniform(jax.random.PRNGKey(0), (500, 3)) * 0.1 + 0.2, 0.02)
+    server.scene.add_mesh_trimesh("ball", ball_sphere.to_trimesh())
 
     while True:
         target_pose = jaxlie.SE3(jnp.array([*target_handle.wxyz, *target_handle.position]))
@@ -104,27 +95,30 @@ def main():
                 lambda vals, var: (vals[var] - rest_pose) * 0.001,
                 (pose_vars[0],)
             ),  # Bias solution to be centered around rest pose.
+            # jaxls.Factor.make(
+            #     lambda vals, var: jnp.maximum(jax_urdf.d_self(cfg=vals[var]), 1.0) * 0.01,
+            #     (pose_vars[0],)
+            # ),  # Avoid self-collision.
             jaxls.Factor.make(
-                lambda vals, var: jnp.maximum(jax_urdf.d_self(cfg=vals[var]) + 0.01, 0.0) * 0.1,
+                lambda vals, var: jnp.maximum(jax_urdf.d_world(cfg=vals[var], other=ball_sphere), 0.0) * 10.0,
                 (pose_vars[0],)
             ),  # Avoid self-collision.
         ]
         graph = jaxls.FactorGraph.make(factors, pose_vars, verbose=False)
         solution = graph.solve(
             initial_vals=jaxls.VarValues.make(pose_vars, [jnp.zeros(yourdf.num_dofs)]),
-            trust_region=jaxls.TrustRegionConfig(lambda_initial=1.1),
+            trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             # verbose=False,
         )
 
         urdf.update_cfg(onp.array(solution[pose_vars[0]]))
+        print(jax_urdf.d_self(cfg=solution[pose_vars[0]]))
 
         joint_idx = jax_urdf.joint_names.index(curr_joint_name)
         calc_pose = jaxlie.SE3(jax_urdf.forward_kinematics(solution[pose_vars[0]])[joint_idx])
         calc_handle.position = onp.array(calc_pose.wxyz_xyz[4:])
         calc_handle.wxyz = onp.array(calc_pose.wxyz_xyz[:4])
-
-        self_coll_value.value = float(jax_urdf.d_self(cfg=solution[pose_vars[0]]).max())
 
         # spheres = jax_urdf.spheres(solution[pose_vars[0]])
         # server.scene.add_mesh_trimesh("spheres", spheres.to_trimesh())
