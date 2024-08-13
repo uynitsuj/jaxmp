@@ -4,18 +4,16 @@ from typing import Optional, cast
 import warnings
 
 import trimesh
+import trimesh.bounds
 import skeletor as sk
 
 import numpy as onp
 import jax_dataclasses as jdc
-from jax.experimental.sparse import BCOO, bcoo_dot_general_sampled
 import jax
 from jax import Array
-from jaxtyping import Float, PyTree
+from jaxtyping import Float
 import jax.numpy as jnp
-
-# Not great, but good enough.
-# Should look into medial axis, etc. Maybe like this: https://github.com/navis-org/skeletor.
+import trimesh.nsphere
 
 
 @jdc.pytree_dataclass
@@ -23,13 +21,10 @@ class Spheres:
     n_pts: jdc.Static[int]
     centers: Float[Array, "sphere 3"]
     radii: Float[Array, "sphere"]
-    metadata: Optional[Float[Array, "sphere"]] = None
 
     @staticmethod
     def from_voxels(
-        mesh: trimesh.Trimesh,
-        n_pts: int = 20,
-        volume: bool = True
+        mesh: trimesh.Trimesh, n_pts: int = 20, volume: bool = True
     ) -> Spheres:
         """
         Create a sphere-based collision body from a mesh, using voxels.
@@ -72,7 +67,7 @@ class Spheres:
             pr = trimesh.proximity.ProximityQuery(mesh)
             dist = pr.signed_distance(voxel_points)
             voxel_radii = dist
-            idx = (dist >= 0.0)
+            idx = dist >= 0.0
             voxel_points = voxel_points[idx]
             voxel_radii = voxel_radii[idx]
 
@@ -118,39 +113,38 @@ class Spheres:
         n_pts: int = 20,
     ) -> Spheres:
         """
-        Create a sphere-based collision body from a mesh, using a skeleton.
+        (not stable) Create a sphere-based collision body from a mesh, using a skeleton.
         """
         # Create a skeleton from the mesh.
-        mesh = cast(
-            trimesh.Trimesh,
-            mesh.subdivide_to_size(0.01)
-        )
-        mesh = cast(
-            trimesh.Trimesh,
-            sk.pre.fix_mesh(mesh)
-        )
+        mesh = cast(trimesh.Trimesh, mesh.subdivide_to_size(0.01))
+        mesh = cast(trimesh.Trimesh, sk.pre.fix_mesh(mesh))
         assert isinstance(mesh, trimesh.Trimesh)
         skel = sk.skeletonize.by_wavefront(mesh, waves=1, progress=False)
         vert, edges = jnp.array(skel.vertices), jnp.array(skel.edges)
 
         # Sample points on the skeleton.
-        rand_edge_idx = jax.random.uniform(jax.random.PRNGKey(0), (10*n_pts,),)
-        rand_idx = jax.random.uniform(jax.random.PRNGKey(0), (10*n_pts,),)
+        rand_edge_idx = jax.random.uniform(
+            jax.random.PRNGKey(0),
+            (10 * n_pts,),
+        )
+        rand_idx = jax.random.uniform(
+            jax.random.PRNGKey(0),
+            (10 * n_pts,),
+        )
         edge_lengths = jax.vmap(jnp.linalg.norm)(vert[edges[:, 0]] - vert[edges[:, 1]])
         edge_cumsum = jnp.cumsum(edge_lengths)
         edge_cumsum = edge_cumsum / edge_cumsum[-1]
 
         edge_idx = jnp.searchsorted(edge_cumsum, rand_edge_idx)
-        centers = (
-            vert[edges[edge_idx, 0]] 
-            + rand_idx[:, None] * (vert[edges[edge_idx, 1]] - vert[edges[edge_idx, 0]])
+        centers = vert[edges[edge_idx, 0]] + rand_idx[:, None] * (
+            vert[edges[edge_idx, 1]] - vert[edges[edge_idx, 0]]
         )
 
         # radii = jnp.full(centers.shape[0], 0.005)
         # ... and create spheres from them!
         pr = trimesh.proximity.ProximityQuery(mesh)
         dist = pr.signed_distance(centers)
-        idx = (dist > 1e-5)  # don't want the spheres to be too small.
+        idx = dist > 1e-5  # don't want the spheres to be too small.
         centers = centers[idx]
         radii = dist[idx]
 
@@ -162,11 +156,7 @@ class Spheres:
         n_pts = centers.shape[0]
         assert n_pts > 0
 
-        return Spheres(
-            n_pts,
-            jnp.array(centers),
-            jnp.array(radii)
-        )
+        return Spheres(n_pts, jnp.array(centers), jnp.array(radii))
 
     @staticmethod
     def from_points(
@@ -180,46 +170,81 @@ class Spheres:
         return Spheres(points.shape[0], points, radii)
 
     @staticmethod
+    def from_obb(
+        mesh: trimesh.Trimesh,
+    ) -> Spheres:
+        """
+        Generate spheres from an oriented bounding box.
+        """
+        to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+        d3_idx = jnp.argmax(extents)
+        d3 = extents[d3_idx]
+        d1, d2 = extents[[i for i in range(3) if i != d3_idx]]
+        dia = jnp.sqrt(d1**2 + d2**2)
+        n_sph = int(jnp.ceil(1 + (d3 / dia)))
+
+        # Create the spheres.
+        centers = onp.zeros((n_sph, 3))
+        centers[:, d3_idx] = onp.linspace(-d3 / 2, d3 / 2, n_sph)
+        centers = trimesh.transform_points(centers, onp.linalg.inv(to_origin))
+        centers = jnp.array(centers)
+
+        radii = jnp.full((n_sph,), dia / 2)
+        return Spheres(n_sph, centers, radii)
+
+    @staticmethod
+    def from_voronoi(
+        mesh: trimesh.Trimesh,
+    ) -> Spheres:
+        """Use trimesh's `minimum_nsphere` to generate spheres."""
+        centers, radii = trimesh.nsphere.minimum_nsphere(mesh)
+
+        # If only detected one sphere, reshape to (1, 3) and (1,). 
+        if len(centers.shape) == 1:
+            centers = centers[None]
+            radii = radii[None]
+
+        assert len(centers.shape) == 2 and len(radii.shape) == 1
+        assert centers.shape[0] == radii.shape[0]
+        return Spheres(
+            centers.shape[0],
+            jnp.array(centers),
+            jnp.array(radii)
+        )
+
+    @staticmethod
     def dist(
         sph_0: Spheres,
         sph_1: Spheres,
-        include: Optional[Float[Array, "sph_0 sph_1"]] = None,
     ) -> Float[Array, "sph_0 sph_1"]:
         """Return distance to another set of spheres. sdf > 0 means collision."""
         n_spheres_sph_0 = sph_0.centers.shape[0]
         n_spheres_sph_1 = sph_1.centers.shape[0]
 
-        if include is not None:
-            assert include.shape == (n_spheres_sph_0, n_spheres_sph_1)
-        else:
-            include = jnp.ones((n_spheres_sph_0, n_spheres_sph_1))
-
-        dist = jnp.linalg.norm(sph_0.centers[:, None] - sph_1.centers[None] + 1e-7, axis=-1)
+        dist = jnp.linalg.norm(
+            sph_0.centers[:, None] - sph_1.centers[None] + 1e-7, axis=-1
+        )
         sdf = (sph_0.radii[:, None] + sph_1.radii[None]) - dist
-        sdf = sdf * include
-        sdf = sdf[jnp.triu_indices(n_spheres_sph_0, k=1)].flatten()
-
-        # assert sdf.shape == (n_spheres_sph_0, n_spheres_sph_1)
+        assert sdf.shape == (n_spheres_sph_0, n_spheres_sph_1)
         return sdf
 
     def to_trimesh(self) -> trimesh.Trimesh:
         """Convert the spheres to a Trimesh object."""
-        spheres = [
-            trimesh.creation.icosphere(radius=radius)
-            for radius in self.radii
-        ]
+        spheres = [trimesh.creation.icosphere(radius=radius) for radius in self.radii]
         for sphere_idx, sphere in enumerate(spheres):
             sphere.vertices += onp.array(self.centers[sphere_idx])
         return sum(spheres, trimesh.Trimesh())
 
 
 if __name__ == "__main__":
-    # mesh = trimesh.creation.box((1, 1, 1))
-    mesh = trimesh.creation.icosphere(radius=1)
+    mesh = trimesh.creation.box((1, 1, 1))
+    # mesh = trimesh.creation.icosphere(radius=1)
     # spheres = Spheres.from_trimesh(mesh, 100)
-    spheres = Spheres.from_skeleton(mesh, 100)
+    # spheres = Spheres.from_skeleton(mesh, 100)
+    spheres = Spheres.from_obb(mesh)
 
     import viser
+
     server = viser.ViserServer()
     server.scene.add_mesh_trimesh("mesh", mesh)
     server.scene.add_mesh_trimesh("spheres", spheres.to_trimesh())

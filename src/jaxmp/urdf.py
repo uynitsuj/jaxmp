@@ -22,7 +22,6 @@ import tyro
 from jaxmp.collision import SphereSDF, MeshSDF
 from jaxmp.collbody import Spheres
 
-# Spheres: Can also do OBB, then fit spheres over it. -- https://arxiv.org/pdf/2407.02363
 # define allowed collision matrix
 
 @jdc.pytree_dataclass
@@ -217,16 +216,36 @@ class JaxUrdf:
 @jdc.pytree_dataclass
 class JaxUrdfwithSphereCollision(JaxUrdf):
     """A differentiable, collision-aware robot kinematics model."""
-    _coll_link_idx: Int[Array, "spheres"]
     _spheres: Spheres
+    """Collision spheres for the robot."""
+
+    _coll_link_to_joint: Int[Array, "spheres"]
+    """Mapping from collision spheres to links."""
+
+    _coll_mat: Int[Array, "spheres spheres"]
+    """Collision matrix, defined on per-sphere basis."""
 
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
+        self_coll_ignore: Optional[list[tuple[str, str]]] = None,
+        ignore_immediate_parent: bool = True,
     ):
+        """
+        Build a differentiable robot model from a URDF.
+        This model also includes collision information for the robot.
+
+        Args:
+            urdf: The URDF object.
+            self_coll_ignore: List of tuples of link names that are allowed to collide.
+            ignore_immediate_parent: If True, ignore collisions between parent and child links.
+        """
         # scrape the collision data.
-        coll_link_idx = []
+        coll_link_to_joint = []
         coll_link_spheres: list[Spheres] = []
+        coll_link_names = []
+        if self_coll_ignore is None:
+            self_coll_ignore = []
 
         # First, create a urdf with the collision data!
         urdf = yourdfpy.URDF(
@@ -247,35 +266,72 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             coll_mesh: Optional[trimesh.Trimesh] = None
             geom = coll_mesh_list[0].geometry
             if geom.box is not None:
-                coll_mesh = trimesh.creation.box(geom.box.size)
+                coll_mesh = trimesh.creation.box(extents=geom.box.size)
             elif geom.cylinder is not None:
-                coll_mesh = trimesh.creation.cylinder(geom.cylinder.radius, geom.cylinder.length)
+                coll_mesh = trimesh.creation.cylinder(
+                    radius=geom.cylinder.radius, height=geom.cylinder.length
+                )
             elif geom.sphere is not None:
                 coll_mesh = trimesh.creation.icosphere(radius=geom.sphere.radius)
             elif geom.mesh is not None:
                 coll_mesh = cast(
                     trimesh.Trimesh,
-                    trimesh.load(urdf._filename_handler(geom.mesh.filename), force="mesh"),
+                    trimesh.load(
+                        file_obj=urdf._filename_handler(geom.mesh.filename),
+                        force="mesh"
+                    ),
                 )
                 coll_mesh.fix_normals()
 
             if coll_mesh is None:
                 raise ValueError(f"No collision mesh found for {curr_link}!")
 
+            # Create the collision spheres.
             assert isinstance(coll_mesh, trimesh.Trimesh), type(coll_mesh)
-            # spheres = Spheres.from_skeleton(coll_mesh)
-            spheres = Spheres.from_voxels(coll_mesh, n_pts=10)
-            coll_link_idx.append([joint_idx] * spheres.n_pts)
+            spheres = Spheres.from_voronoi(coll_mesh)
+            coll_link_to_joint.append([joint_idx] * spheres.n_pts)
             coll_link_spheres.append(spheres)
+            coll_link_names.append([curr_link] * spheres.n_pts)
 
-        coll_link_idx = jnp.array(sum(coll_link_idx, []))
+            # Add the parent/child link to the allowed collision list.
+            if ignore_immediate_parent:
+                self_coll_ignore.append((joint.parent, curr_link))
+
+        coll_link_to_joint = jnp.array(sum(coll_link_to_joint, []))
         spheres = Spheres(
             n_pts=sum(s.n_pts for s in coll_link_spheres),
             centers=jnp.concatenate([s.centers for s in coll_link_spheres]),
             radii=jnp.concatenate([s.radii for s in coll_link_spheres]),
-            metadata=jnp.array(coll_link_idx),
         )
-        assert coll_link_idx.shape[0] == spheres.n_pts
+        assert coll_link_to_joint.shape[0] == spheres.n_pts
+
+        # Calculate the allowed collision matrix.
+        coll_link_names = sum(coll_link_names, [])
+
+        def check_coll(i: int, j: int) -> bool:
+            if i == j:
+                return False
+
+            if (
+                urdf.link_map[coll_link_names[i]].name,
+                urdf.link_map[coll_link_names[j]].name,
+            ) in self_coll_ignore:
+                return False
+            elif (
+                urdf.link_map[coll_link_names[j]].name,
+                urdf.link_map[coll_link_names[i]].name,
+            ) in self_coll_ignore:
+                return False
+
+            return True
+
+        coll_mat = jnp.array(
+            [
+                [check_coll(i, j) for j in range(spheres.n_pts)]
+                for i in range(spheres.n_pts)
+            ]
+        )
+        assert coll_mat.shape == (spheres.n_pts, spheres.n_pts)
 
         print(f"Found {spheres.n_pts} collision spheres.")
 
@@ -292,8 +348,9 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             limits_lower=jnp.array(jax_urdf.limits_lower),
             limits_upper=jnp.array(jax_urdf.limits_upper),
             parent_indices=jnp.array(jax_urdf.parent_indices),
-            _coll_link_idx=coll_link_idx,
+            _coll_link_to_joint=coll_link_to_joint,
             _spheres=spheres,
+            _coll_mat=coll_mat,
         )
 
     @jdc.jit
@@ -305,12 +362,12 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         """Check if the robot collides with the world, in the provided configuration.
         Get the max signed distance field (sdf) for each joint."""
         self_spheres = self.spheres(cfg)
-        assert self_spheres.metadata is not None
         dist = Spheres.dist(self_spheres, other)
         dist = dist.max(axis=1)
         assert dist.shape == (self_spheres.n_pts,)
         return dist
 
+    @jdc.jit
     def d_self(
         self,
         cfg: Float[Array, "num_act_joints"],
@@ -318,22 +375,9 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         """Check if the robot collides with itself, in the provided configuration.
         Get the max signed distance field (sdf) for each joint. sdf > 0 means collision."""
         self_spheres = self.spheres(cfg)
-        assert self_spheres.metadata is not None
-        # include = (self_spheres.metadata[:, None] != self_spheres.metadata[None, :]).astype(jnp.float32)
-        include = (
-            jnp.abs(self_spheres.metadata[:, None] - self_spheres.metadata[None, :]) >= 5
-        ).astype(jnp.float32)  # jank ACM approximation i.e., only exclude adjacent links.
-        dist = Spheres.dist(
-            self_spheres,
-            self_spheres,
-            include=include,
-        )
-        # dist = jnp.triu(dist, k=1)
-        # dist = dist.max(axis=1)
-        # assert dist.shape == (self_spheres.n_pts,)
-        # breakpoint()
-        # dist = jax.ops.segment_sum(dist, self_spheres.metadata)
-        # assert dist.shape == (self.num_links,)
+        dist = Spheres.dist(self_spheres, self_spheres)
+        assert dist.shape == (self_spheres.n_pts, self_spheres.n_pts)
+        dist = (dist * self._coll_mat).flatten()
         return dist
 
     @jdc.jit
@@ -349,7 +393,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
 
         centers = jaxlie.SE3.from_translation(self._spheres.centers)
         centers_transformed = (
-            jaxlie.SE3(Ts_world_joint[..., self._coll_link_idx, :])
+            jaxlie.SE3(Ts_world_joint[..., self._coll_link_to_joint, :])
             @ centers
         ).translation()
 
@@ -358,7 +402,6 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             n_pts=num_spheres,
             centers=centers_transformed,
             radii=self._spheres.radii,
-            metadata=self._spheres.metadata,
         )
 
 
