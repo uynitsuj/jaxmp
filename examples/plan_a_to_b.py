@@ -117,7 +117,7 @@ def main():
     """
     pos_weight: float = 50.0
     rot_weight: float = 0.0
-    coll_weight: float = 20.0
+    coll_weight: float = 50.0
     rest_weight: float = 0.001
     limit_weight: float = 100_000.0
     smoothness_weight: float = 1.0
@@ -134,21 +134,21 @@ def main():
     target_idx_r = jax_urdf.joint_names.index("yumi_joint_6_r")
     target_idx_l = jax_urdf.joint_names.index("yumi_joint_6_l")
 
-    pose_l_start = jaxlie.SE3.from_rotation_and_translation(
-        rotation=jaxlie.SO3.from_y_radians(jnp.pi),
-        translation=jnp.array([0.4, 0.0, 0.5])
-    )
-    pose_l_end = jaxlie.SE3.from_rotation_and_translation(
-        rotation=jaxlie.SO3.from_y_radians(jnp.pi),
-        translation=jnp.array([0.4, 0.0, 0.3])
-    )
     pose_r_start = jaxlie.SE3.from_rotation_and_translation(
         rotation=jaxlie.SO3.from_y_radians(jnp.pi),
-        translation=jnp.array([0.3, 0.0, 0.4])
+        translation=jnp.array([0.4, 0.0, 0.4])
     )
     pose_r_end = jaxlie.SE3.from_rotation_and_translation(
         rotation=jaxlie.SO3.from_y_radians(jnp.pi),
-        translation=jnp.array([0.5, -0.0, 0.4])
+        translation=jnp.array([0.4, 0.0, 0.2])
+    )
+    pose_l_start = jaxlie.SE3.from_rotation_and_translation(
+        rotation=jaxlie.SO3.from_y_radians(jnp.pi),
+        translation=jnp.array([0.2, 0.0, 0.3])
+    )
+    pose_l_end = jaxlie.SE3.from_rotation_and_translation(
+        rotation=jaxlie.SO3.from_y_radians(jnp.pi),
+        translation=jnp.array([0.6, -0.0, 0.3])
     )
 
     # Create a variable for the robot's joint positions.
@@ -262,13 +262,46 @@ def main():
         trust_region=jaxls.TrustRegionConfig(lambda_initial=1.1),
         termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
     )
+    traj = onp.array([solution[pose_var] for pose_var in joint_vars])
     print("Elapsed time (exec): ", time.time() - start)
 
-    traj = onp.array([solution[pose_var] for pose_var in joint_vars])
+    # Assemble the factor graph!
+    factors: List[jaxls.Factor] = []
+    factors.extend([
+        jaxls.Factor.make(ik_on_joint, (joint_vars[0], pose_r_start, target_idx_r,)),  # Position constraints.
+        jaxls.Factor.make(ik_on_joint, (joint_vars[-1], pose_r_end, target_idx_r,)),  # Position constraints.
+        jaxls.Factor.make(ik_on_joint, (joint_vars[0], pose_l_start, target_idx_l,)),  # Position constraints.
+        jaxls.Factor.make(ik_on_joint, (joint_vars[-1], pose_l_end, target_idx_l,)),  # Position constraints.
+    ])
+    for tstep, pose_var in enumerate(joint_vars):
+        factors.extend(
+            [
+                jaxls.Factor.make(joint_angle_prior_factor, (pose_var,)),  # Lower joint limits.
+            ]
+        )
+        if tstep > 0:
+            factors.extend(
+                [
+                    jaxls.Factor.make(smoothness_joint_factor, (pose_var, joint_vars[tstep - 1])),
+                    # jaxls.Factor.make(self_coll_factor, (pose_var, joint_vars[tstep - 1])),  # Avoid self-collision.
+                ]
+            )
+    start = time.time()
+    graph = jaxls.FactorGraph.make(factors, joint_vars)
+    solution = graph.solve(
+        initial_vals=jaxls.VarValues.make(joint_vars, init_joint),
+        trust_region=jaxls.TrustRegionConfig(lambda_initial=1.1),
+        termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
+    )
+    print("Elapsed time (jit + exec): ", time.time() - start)
+    traj_no_coll = onp.array([solution[pose_var] for pose_var in joint_vars])
 
     server = viser.ViserServer()
     urdf_orig = viser.extras.ViserUrdf(
         server, yourdf, root_node_name="/urdf_orig"
+    )
+    urdf_no_coll = viser.extras.ViserUrdf(
+        server, yourdf, root_node_name="/urdf_orig_no_coll", mesh_color_override=(220, 100, 100),
     )
     server.scene.add_frame("r_start", wxyz=pose_r_start.wxyz_xyz[:4], position=pose_r_start.wxyz_xyz[4:], axes_length=0.05, axes_radius=0.002)
     server.scene.add_frame("r_end", wxyz=pose_r_end.wxyz_xyz[:4], position=pose_r_end.wxyz_xyz[4:], axes_length=0.05, axes_radius=0.002)
@@ -283,6 +316,7 @@ def main():
     @slider.on_update
     def _(_) -> None:
         urdf_orig.update_cfg(traj[slider.value])
+        urdf_no_coll.update_cfg(traj_no_coll[slider.value])
         server.scene.add_mesh_trimesh("spheres", jax_urdf.spheres(cfg=traj[slider.value]).to_trimesh())
 
     playing = server.gui.add_checkbox("Playing", initial_value=True)

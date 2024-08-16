@@ -386,6 +386,7 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
             dist + 0.5 * 0.05,
             0.5 / 0.05 * (dist + 0.05)**2
         )
+        dist = jnp.maximum(dist, 0.0)
         return dist
 
     @jdc.jit
