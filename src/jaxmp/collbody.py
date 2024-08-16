@@ -225,6 +225,14 @@ class Spheres:
             sph_0.centers[:, None] - sph_1.centers[None] + 1e-7, axis=-1
         )
         sdf = (sph_0.radii[:, None] + sph_1.radii[None]) - dist
+
+        # make the code above faster by using jax.vmap.
+        # def dist_single(sph_0_center, sph_0_radius, sph_1_center, sph_1_radius):
+        #     return (sph_0_radius + sph_1_radius) - jnp.linalg.norm(sph_0_center - sph_1_center + 1e-7)
+        # sdf = jax.vmap(dist_single, in_axes=(0, 0, None, None))(
+        #     sph_0.centers, sph_0.radii, sph_1.centers, sph_1.radii
+        # )
+
         assert sdf.shape == (n_spheres_sph_0, n_spheres_sph_1)
         return sdf
 

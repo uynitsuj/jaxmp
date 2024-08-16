@@ -94,6 +94,8 @@ class JaxUrdf:
                     joint_twists.append(onp.concatenate([onp.zeros(3), joint.axis]))
                 elif joint.type == "prismatic":
                     joint_twists.append(onp.concatenate([joint.axis, onp.zeros(3)]))
+                else:
+                    raise ValueError(f"Unsupported joint type {joint.type}!")
             else:
                 idx_actuated_joint.append(-1)
 
@@ -378,6 +380,12 @@ class JaxUrdfwithSphereCollision(JaxUrdf):
         dist = Spheres.dist(self_spheres, self_spheres)
         assert dist.shape == (self_spheres.n_pts, self_spheres.n_pts)
         dist = (dist * self._coll_mat).flatten()
+        dist = jnp.maximum(dist, -0.05)
+        dist = jnp.where(
+            dist > 0,
+            dist + 0.5 * 0.05,
+            0.5 / 0.05 * (dist + 0.05)**2
+        )
         return dist
 
     @jdc.jit

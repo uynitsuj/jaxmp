@@ -6,7 +6,6 @@ from typing import Literal
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import jax
-jax.config.update("jax_platform_name", "cpu")
 import jax_dataclasses as jdc
 import jaxlie
 import numpy as onp
@@ -151,14 +150,12 @@ def main():
     pose_vars = [RobotVar(id=idx) for idx in range(timesteps)]
 
     # Define the factors.
-    def lower_joint_factor(vals, var):
-        return (vals[var] - jax_urdf.limits_lower).clip(max=0.0) * limit_weight
-
-    def upper_joint_factor(vals, var):
-        return (vals[var] - jax_urdf.limits_upper).clip(min=0.0) * limit_weight
-
-    def rest_pose_factor(vals, var):
-        return (vals[var] - rest_pose) * rest_weight
+    def joint_angle_prior_factor(vals, var):
+        return (
+            (vals[var] - jax_urdf.limits_lower).clip(max=0.0) * limit_weight +
+            (vals[var] - jax_urdf.limits_upper).clip(min=0.0) * limit_weight +
+            (vals[var] - rest_pose) * rest_weight
+        )
 
     def self_coll_factor(vals, var):
         return jnp.maximum(jax_urdf.d_self(cfg=vals[var]) + 0.05, 0.0)**2 * coll_weight / timesteps
@@ -171,7 +168,10 @@ def main():
         ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3) / timesteps
         return pose_loss
 
-    def smoothness_factor(vals, var, var_t):
+    def smoothness_joint_factor(vals, var, var_t):
+        return (vals[var].inverse @ vals[var_t]).log() * smoothness_weight / (timesteps - 1)
+
+    def smoothness_pose_factor(vals, var, var_t):
         return (vals[var] - vals[var_t]) * smoothness_weight / (timesteps - 1)
     
     # Assemble the factor graph!
@@ -184,17 +184,16 @@ def main():
         target_pose_l = jaxlie.SE3(orig_Ts_world_joint[tstep, target_joint_l])
         factors.extend(
             [
-                jaxls.Factor.make(lower_joint_factor, (pose_var,)),  # Lower joint limits.
-                jaxls.Factor.make(upper_joint_factor, (pose_var,)),  # Upper joint limits.
-                jaxls.Factor.make(rest_pose_factor, (pose_var,)),  # Bias solution to be centered around rest pose.
-                # jaxls.Factor.make(self_coll_factor, (pose_var,)),  # Avoid self-collision.
+                jaxls.Factor.make(joint_angle_prior_factor, (pose_var,)),  # Lower joint limits.
+                jaxls.Factor.make(self_coll_factor, (pose_var,)),  # Avoid self-collision.
                 jaxls.Factor.make(ik_on_joint, (pose_var, target_pose_r, target_joint_r,)),  # Position constraints.
                 jaxls.Factor.make(ik_on_joint, (pose_var, target_pose_l, target_joint_l,)),  # Position constraints.
             ]
         )
         if tstep > 0:
             factors.append(
-                jaxls.Factor.make(smoothness_factor, (pose_var, pose_vars[tstep - 1]))
+                jaxls.Factor.make(smoothness_joint_factor, (pose_var, pose_vars[tstep - 1])),
+                jaxls.Factor.make(smoothness_pose_factor, (pose_var, pose_vars[tstep - 1]))
             )
 
     start = time.time()
