@@ -2,7 +2,6 @@
 Simple point-to-point motion planning.
 """
 
-from pathlib import Path
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import jax
