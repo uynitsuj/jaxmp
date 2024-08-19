@@ -11,7 +11,7 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.collbody import sdf_to_colldist
+from jaxmp.collbody import sdf_to_colldist, PlaneColl
 from jaxmp.kinematics import JaxCollKinematics
 
 def main(
@@ -49,6 +49,10 @@ def main(
         initial_value=urdf.joint_names[0]
     )
 
+    # Create ground plane as an obstacle (world collision)!
+    obstacle = PlaneColl(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, 1.0]))
+    server.scene.add_mesh_trimesh("ground_plane", obstacle.to_trimesh())
+
     # Create factor graph.
     class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
 
@@ -71,6 +75,9 @@ def main(
     def coll_self(vals, var):
         return sdf_to_colldist(kin.d_self(cfg=vals[var])) * coll_weight
 
+    def coll_world(vals, var):
+        return sdf_to_colldist(kin.d_world(cfg=vals[var], other=obstacle)) * coll_weight
+
     sphere_handle = None
     def solve_ik():
         nonlocal sphere_handle
@@ -84,6 +91,8 @@ def main(
                 jaxls.Factor.make(ik_to_joint, (joint_vars[0], target_pose, target_joint_idx)),
                 jaxls.Factor.make(limit_cost, (joint_vars[0],)),
                 jaxls.Factor.make(coll_self, (joint_vars[0],)),
+                jaxls.Factor.make(coll_world, (joint_vars[0],)),
+                jaxls.Factor.make(lambda vals, var: (vals[var] - rest_pose) * 0.1, (joint_vars[0],)),
             ],
             joint_vars,
             verbose=False,
