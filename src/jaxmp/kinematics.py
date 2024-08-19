@@ -9,7 +9,7 @@ Includes:
 
 from __future__ import annotations
 
-from typing import Optional, cast
+from typing import Optional, cast, Union
 import warnings
 import trimesh
 
@@ -23,7 +23,7 @@ from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float, Int
 
-from jaxmp.collbody import SphereColl
+from jaxmp.collbody import SphereColl, PlaneColl
 
 
 @jdc.pytree_dataclass
@@ -348,14 +348,17 @@ class JaxCollKinematics(JaxKinematics):
     def d_world(
         self,
         cfg: Float[Array, "num_act_joints"],
-        other: SphereColl
+        other: Union[SphereColl, PlaneColl]
     ) -> Float[Array, "num_spheres"]:
         """Check if the robot collides with the world, in the provided configuration.
         Get the max signed distance field (sdf) for each joint."""
         self_spheres = self.spheres(cfg)
         n_pts = self_spheres.centers.shape[0]
-        dist = SphereColl.dist(self_spheres, other)
-        dist = dist.max(axis=1)
+        if isinstance(other, SphereColl):
+            dist = self_spheres.dist(other)
+            dist = dist.max(axis=1)
+        elif isinstance(other, PlaneColl):
+            dist = self_spheres.dist_to_plane(other)
         assert dist.shape == (n_pts,)
         return dist
 
