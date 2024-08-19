@@ -41,6 +41,10 @@ def main():
         sphere_1_mesh = sphere_1_coll.to_trimesh()
         sphere_2_mesh = sphere_2_coll.to_trimesh()
 
+        assert plane_mesh.visual is not None
+        assert sphere_1_mesh.visual is not None
+        assert sphere_2_mesh.visual is not None
+
         if plane_in_collision:
             plane_mesh.visual.vertex_colors = onp.array([1.0, 0.5, 0.5, 1.0])
         else:
