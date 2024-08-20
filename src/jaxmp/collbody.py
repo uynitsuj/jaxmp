@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 import trimesh
 import numpy as onp
 
-from jaxtyping import Float
-import jax_dataclasses as jdc
-
 from jax import Array
 import jax.numpy as jnp
+
+from jaxtyping import Float
+import jax_dataclasses as jdc
+import jaxlie
+
 
 if TYPE_CHECKING:
     import trimesh.nsphere
@@ -83,6 +85,11 @@ class SphereColl:
             sphere.vertices += onp.array(self.centers[sphere_idx])
         return sum(spheres, trimesh.Trimesh())
 
+    def transform(self, tf: jaxlie.SE3) -> SphereColl:
+        """Transform the spheres by a SE3 transformation."""
+        centers = tf.apply(self.centers)
+        return SphereColl(centers, self.radii)
+
 
 @jdc.pytree_dataclass
 class PlaneColl:
@@ -116,6 +123,12 @@ class PlaneColl:
             plane.vertices, mat
         )
         return plane
+
+    def transform(self, tf: jaxlie.SE3) -> PlaneColl:
+        """Transform the plane by a SE3 transformation."""
+        point = tf.apply(self.point)
+        normal = tf.rotation().apply(self.normal)
+        return PlaneColl(point, normal)
 
 
 def sdf_to_colldist(
