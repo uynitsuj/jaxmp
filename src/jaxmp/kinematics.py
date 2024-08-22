@@ -9,7 +9,7 @@ Includes:
 
 from __future__ import annotations
 
-from typing import Optional, cast, Union
+from typing import Optional, cast
 import warnings
 import trimesh
 
@@ -23,12 +23,12 @@ from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float, Int
 
-from jaxmp.collbody import SphereColl, PlaneColl
+from jaxmp.collbody import CollBody, CapsuleColl, sdf_collbody
 
 
 @jdc.pytree_dataclass
-class JaxKinematics:
-    """A differentiable robot kinematics model."""
+class JaxKinTree:
+    """A differentiable robot kinematics tre."""
 
     num_joints: jdc.Static[int]
     joint_names: jdc.Static[tuple[str]]
@@ -48,7 +48,7 @@ class JaxKinematics:
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
-    ) -> JaxKinematics:
+    ) -> JaxKinTree:
         """Build a differentiable robot model from a URDF."""
 
         joint_from_child = {joint.child: joint for joint in urdf.joint_map.values()}
@@ -110,7 +110,7 @@ class JaxKinematics:
                 parent_index = urdf.joint_names.index(parent_joint.name)
                 if parent_index >= joint_idx:
                     warnings.warn(
-                        f"Parent index {parent_index} >= joint index {joint_idx}!" +
+                        f"Parent index {parent_index} >= joint index {joint_idx}! " +
                         "Assuming that parent is root."
                     )
                     if parent_joint.parent != urdf.scene.graph.base_frame:
@@ -140,7 +140,7 @@ class JaxKinematics:
         assert parent_indices.shape == (num_joints,)
         assert idx_actuated_joint.max() == num_actuated_joints - 1
 
-        return JaxKinematics(
+        return JaxKinTree(
             num_joints=num_joints,
             joint_names=joint_names,
             num_actuated_joints=num_actuated_joints,
@@ -203,20 +203,21 @@ class JaxKinematics:
 
 
 @jdc.pytree_dataclass
-class JaxCollKinematics(JaxKinematics):
+class JaxCollKinematics(JaxKinTree):
     """A differentiable, collision-aware robot kinematics model."""
-    _spheres: SphereColl
-    """Collision spheres for the robot."""
+    _spheres: CollBody
+    """Collision body for the robot."""
 
-    _coll_link_to_joint: Int[Array, "spheres"]
+    _coll_link_to_joint: Int[Array, "colls"]
     """Mapping from collision spheres to links."""
 
-    _coll_mat: Int[Array, "spheres spheres"]
+    _coll_mat: Int[Array, "colls colls"]
     """Collision matrix, defined on per-sphere basis."""
 
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
+        coll_type: type[CollBody] = CapsuleColl,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):
@@ -231,7 +232,7 @@ class JaxCollKinematics(JaxKinematics):
         """
         # scrape the collision data.
         coll_link_to_joint = []
-        coll_link_spheres: list[SphereColl] = []
+        list_coll_link_body: list[CollBody] = []
         coll_link_names = []
         if self_coll_ignore is None:
             self_coll_ignore = []
@@ -280,10 +281,10 @@ class JaxCollKinematics(JaxKinematics):
 
             # Create the collision spheres.
             assert isinstance(coll_link_mesh, trimesh.Trimesh), type(coll_link_mesh)
-            spheres = SphereColl.from_min_ball(coll_link_mesh)
-            n_pts = spheres.centers.shape[0]
+            coll_body = coll_type.from_trimesh(coll_link_mesh)
+            n_pts = len(coll_body)
             coll_link_to_joint.append([joint_idx] * n_pts)
-            coll_link_spheres.append(spheres)
+            list_coll_link_body.append(coll_body)
             coll_link_names.append([curr_link] * n_pts)
 
             # Add the parent/child link to the allowed collision list.
@@ -291,17 +292,15 @@ class JaxCollKinematics(JaxKinematics):
                 self_coll_ignore.append((joint.parent, curr_link))
 
         coll_link_to_joint = jnp.array(sum(coll_link_to_joint, []))
-        spheres = SphereColl(
-            centers=jnp.concatenate([s.centers for s in coll_link_spheres]),
-            radii=jnp.concatenate([s.radii for s in coll_link_spheres]),
-        )
-        n_pts = spheres.centers.shape[0]
+        coll_body = cast(CapsuleColl, sum(list_coll_link_body))
+        n_pts = len(coll_body)
         assert coll_link_to_joint.shape[0] == n_pts
 
         # Calculate the allowed collision matrix.
         coll_link_names = sum(coll_link_names, [])
 
         def check_coll(i: int, j: int) -> bool:
+            """Remove self- and adjacent link collisions."""
             if i == j:
                 return False
 
@@ -310,7 +309,7 @@ class JaxCollKinematics(JaxKinematics):
                 urdf.link_map[coll_link_names[j]].name,
             ) in self_coll_ignore:
                 return False
-            elif (
+            if (
                 urdf.link_map[coll_link_names[j]].name,
                 urdf.link_map[coll_link_names[i]].name,
             ) in self_coll_ignore:
@@ -326,9 +325,9 @@ class JaxCollKinematics(JaxKinematics):
         )
         assert coll_mat.shape == (n_pts, n_pts)
 
-        print(f"Found {n_pts} collision spheres.")
+        print(f"Found {n_pts} collision bodies.")
 
-        jax_urdf = JaxKinematics.from_urdf(urdf)
+        jax_urdf = JaxKinTree.from_urdf(urdf)
         return JaxCollKinematics(
             num_joints=len(jax_urdf.parent_indices),
             joint_names=jax_urdf.joint_names,
@@ -340,7 +339,7 @@ class JaxCollKinematics(JaxKinematics):
             limits_upper=jnp.array(jax_urdf.limits_upper),
             parent_indices=jnp.array(jax_urdf.parent_indices),
             _coll_link_to_joint=coll_link_to_joint,
-            _spheres=spheres,
+            _spheres=coll_body,
             _coll_mat=coll_mat,
         )
 
@@ -348,18 +347,13 @@ class JaxCollKinematics(JaxKinematics):
     def d_world(
         self,
         cfg: Float[Array, "num_act_joints"],
-        other: Union[SphereColl, PlaneColl]
+        other: CollBody,
     ) -> Float[Array, "num_spheres"]:
         """Check if the robot collides with the world, in the provided configuration.
         Get the max signed distance field (sdf) for each joint."""
-        self_spheres = self.spheres(cfg)
-        n_pts = self_spheres.centers.shape[0]
-        if isinstance(other, SphereColl):
-            dist = self_spheres.dist(other)
-            dist = dist.max(axis=1)
-        elif isinstance(other, PlaneColl):
-            dist = self_spheres.dist_to_plane(other)
-        assert dist.shape == (n_pts,)
+        self_coll = self.collbody(cfg)
+        dist = sdf_collbody(self_coll, other)
+        dist = dist.flatten()
         return dist
 
     @jdc.jit
@@ -377,32 +371,21 @@ class JaxCollKinematics(JaxKinematics):
         Return:
             The signed distance field (sdf) for the robot, in the format `(*batch num_spheres)`.
         """
-        self_spheres = self.spheres(cfg)
-        n_pts = self_spheres.centers.shape[0]
-        dist = SphereColl.dist(self_spheres, self_spheres)
-        assert dist.shape == (n_pts, n_pts)
+        self_coll = self.collbody(cfg)
+        dist = sdf_collbody(self_coll, self_coll)
         dist = (dist * self._coll_mat).flatten()
         return dist
 
     @jdc.jit
-    def spheres(
+    def collbody(
         self,
         cfg: Float[Array, "*batch num_act_joints"]
-    ) -> SphereColl:
+    ) -> CapsuleColl:
         """Get the spheres in the world frame, in the provided configuration."""
         batch_size = cfg.shape[:-1]
-        num_spheres = self._spheres.centers.shape[0]
         Ts_world_joint = self.forward_kinematics(cfg)
         assert Ts_world_joint.shape == (*batch_size, self.num_joints, 7)
 
-        centers = jaxlie.SE3.from_translation(self._spheres.centers)
-        centers_transformed = (
+        return self._spheres.transform(
             jaxlie.SE3(Ts_world_joint[..., self._coll_link_to_joint, :])
-            @ centers
-        ).translation()
-
-        assert centers_transformed.shape == (*batch_size, num_spheres, 3)
-        return SphereColl(
-            centers=centers_transformed,
-            radii=self._spheres.radii,
         )

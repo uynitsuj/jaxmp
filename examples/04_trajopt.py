@@ -12,7 +12,7 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.kinematics import JaxKinematics
+from jaxmp.kinematics import JaxKinTree
 
 def main(
     pos_weight: float = 5.0,
@@ -21,7 +21,7 @@ def main(
     smoothness_weight: float = 1.0
 ):
     yourdf = load_robot_description("yumi_description")
-    kin = JaxKinematics.from_urdf(yourdf)
+    kin = JaxKinTree.from_urdf(yourdf)
     trajectory = onp.load(
         Path(__file__).parent / "assets/yumi_trajectory.npy",
         allow_pickle=True

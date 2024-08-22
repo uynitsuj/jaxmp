@@ -2,7 +2,12 @@
 Tests robot forward + inverse kinematics using JaxMP.
 """
 
+import time
+
 from robot_descriptions.loaders.yourdfpy import load_robot_description
+
+import viser
+import viser.extras
 
 import jax
 import jax.numpy as jnp
@@ -11,20 +16,17 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.kinematics import JaxKinematics
+from jaxmp.kinematics import JaxKinTree
 
 def main(
-    pos_weight: float = 5.0,
+    robot_description: str = "yumi_description",
+    pos_weight: float = 2.0,
     rot_weight: float = 0.5,
     limit_weight: float = 100.0,
 ):
-    urdf = load_robot_description("yumi_description")
-    kin = JaxKinematics.from_urdf(urdf)
+    urdf = load_robot_description(robot_description)
+    kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
-
-    import viser
-    import viser.extras
-    import time
 
     server = viser.ViserServer()
 

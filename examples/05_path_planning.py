@@ -186,7 +186,7 @@ def main(
         if visualize_spheres.value:
             sphere_handle = server.scene.add_mesh_trimesh(
                 "spheres",
-                kin.spheres(traj[slider.value]).to_trimesh()
+                kin.collbody(traj[slider.value]).to_trimesh()
             )
         elif sphere_handle is not None:
             sphere_handle.remove()

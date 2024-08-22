@@ -2,6 +2,7 @@
 Similar to 04_trajopt.py, but including manipulability as the cost function!
 """
 
+from typing import cast
 from pathlib import Path
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
@@ -34,6 +35,39 @@ def main(
     ).item()  # {'joint_name': [time, wxyz_xyz]}
     timesteps = list(trajectory.values())[0].shape[0]
 
+    n_rot = -0
+    trajectory['yumi_joint_6_r'] = (
+        jaxlie.SE3.from_translation(jnp.array([0.7, 0.0, 0.0])) @
+        jaxlie.SE3.from_rotation(jaxlie.SO3.from_z_radians(jnp.pi / 8 * n_rot)) @
+        jaxlie.SE3.from_translation(jnp.array([-0.4, 0.0, 0.0])) @
+        jaxlie.SE3(trajectory['yumi_joint_6_r'])
+    ).wxyz_xyz
+
+    trajectory['yumi_joint_6_l'] = (
+        jaxlie.SE3.from_translation(jnp.array([0.7, 0.0, 0.0])) @
+        jaxlie.SE3.from_rotation(jaxlie.SO3.from_z_radians(jnp.pi / 8 * n_rot)) @
+        jaxlie.SE3.from_translation(jnp.array([-0.4, 0.0, 0.0])) @
+        jaxlie.SE3(trajectory['yumi_joint_6_l'])
+    ).wxyz_xyz
+
+    rest_pose = jnp.array([
+        1.21442839,
+        -1.03205606,
+        -1.10072738,
+        0.2987352,
+        -1.85257716,
+        1.25363652,
+        -2.42181893,
+        -1.24839656,
+        -1.09802876,
+        1.06634394,
+        0.31386161,
+        1.90125141,
+        1.3205139,
+        2.43563939,
+        0.0,
+        0.0,
+    ])
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
@@ -97,7 +131,8 @@ def main(
         for idx, joint_name in zip(list_target_joint_idx, trajectory.keys()):
             factors.extend([
                 jaxls.Factor.make(
-                    ik_to_joint_with_offset, (traj_vars[tstep], jaxlie.SE3(trajectory[joint_name][tstep]), traj_vars[-1], idx),
+                    ik_to_joint_with_offset,
+                    (traj_vars[tstep], jaxlie.SE3(trajectory[joint_name][tstep]), traj_vars[-1], idx),
                 ),
                 jaxls.Factor.make(manipulability_cost, (traj_vars[tstep], idx)),
             ])
@@ -106,11 +141,14 @@ def main(
             jaxls.Factor.make(self_coll_cost, (traj_vars[tstep],)),
         ])
         if tstep > 0:
-            factors.append(jaxls.Factor.make( smoothness_cost, (traj_vars[tstep], traj_vars[tstep - 1]),))
+            factors.append(jaxls.Factor.make(
+                smoothness_cost, (traj_vars[tstep], traj_vars[tstep - 1]),)
+            )
     factors.append(
         jaxls.Factor.make(
-            lambda vals, var: (
-                vals[var] @ jaxlie.SE3(jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+            lambda vals, var: cast(
+                jaxlie.SE3,
+                (vals[var] @ jaxlie.SE3(jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
             ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3),
             (traj_vars[-1],)
         )
@@ -130,6 +168,10 @@ def main(
         termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
     )
     traj = onp.array([solution[var] for var in traj_vars[:-1]])
+    offset_pose = cast(
+        jaxlie.SE3,
+        solution[traj_vars[-1]]
+    )
 
     # Run again, but without manipulability cost.
     traj_vars = [JointVar(id=i) for i in range(timesteps)]
@@ -148,7 +190,7 @@ def main(
             )
         ])
         if tstep > 0:
-            factors.append(jaxls.Factor.make( smoothness_cost, (traj_vars[tstep], traj_vars[tstep - 1]),))
+            factors.append(jaxls.Factor.make(smoothness_cost, (traj_vars[tstep], traj_vars[tstep - 1]),))
     graph = jaxls.FactorGraph.make(
         factors,
         traj_vars,
@@ -176,9 +218,19 @@ def main(
     slider = server.gui.add_slider(
         "Timestep", min=0, max=timesteps - 1, step=1, initial_value=0
     )
+
+    server.scene.add_frame('original', show_axes=False)
+    server.scene.add_frame('offset', wxyz=offset_pose.wxyz_xyz[:4], position=offset_pose.wxyz_xyz[4:], show_axes=False)
     for joint_name, joint_pose_traj in trajectory.items():
         server.scene.add_batched_axes(
-            joint_name,
+            "original/" + joint_name,
+            batched_positions=joint_pose_traj[:, 4:],
+            batched_wxyzs=joint_pose_traj[:, :4],
+            axes_length=0.02,
+            axes_radius=0.002
+        )
+        server.scene.add_batched_axes(
+            'offset/' + joint_name,
             batched_positions=joint_pose_traj[:, 4:],
             batched_wxyzs=joint_pose_traj[:, :4],
             axes_length=0.02,

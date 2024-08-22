@@ -13,7 +13,7 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.kinematics import JaxKinematics
+from jaxmp.kinematics import JaxKinTree
 
 def main(
     pos_weight: float = 5.0,
@@ -24,7 +24,7 @@ def main(
     urdf = load_robot_description("yumi_description")
     # urdf = load_robot_description("panda_description")
     # urdf = load_robot_description("ur5_description")
-    kin = JaxKinematics.from_urdf(urdf)
+    kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     import viser
