@@ -10,7 +10,6 @@ Includes:
 from __future__ import annotations
 
 from typing import Optional, cast
-import warnings
 import trimesh
 
 import jax
@@ -18,6 +17,7 @@ import jax_dataclasses as jdc
 import jaxlie
 import numpy as onp
 import yourdfpy
+from loguru import logger
 
 from jax import Array
 from jax import numpy as jnp
@@ -71,9 +71,8 @@ class JaxKinTree:
                 mimicked_joint = urdf.joint_map[joint.mimic.joint]
                 mimicked_joint_idx = urdf.actuated_joints.index(mimicked_joint)
                 assert mimicked_joint_idx < joint_idx, "Code + fk `fori_loop` assumes this!"
-                warnings.warn("Mimic joint detected, assuming multiplier=1.0, offset=0.0.")
+                logger.warning("Mimic joint detected, assuming multiplier=1.0, offset=0.0.")
                 act_joint_idx = urdf.actuated_joints.index(mimicked_joint)
-                idx_actuated_joint.append(act_joint_idx)
 
                 # ... skip the twist info, since mimic joints are not actuated.
             elif joint in urdf.actuated_joints:
@@ -87,7 +86,6 @@ class JaxKinTree:
                 joint_lim_upper.append(joint.limit.upper)
 
                 act_joint_idx = urdf.actuated_joints.index(joint)
-                idx_actuated_joint.append(act_joint_idx)
 
                 # We use twists in the (v, omega) convention.
                 if joint.type == "revolute":
@@ -97,7 +95,9 @@ class JaxKinTree:
                 else:
                     raise ValueError(f"Unsupported joint type {joint.type}!")
             else:
-                idx_actuated_joint.append(-1)
+                act_joint_idx = -1
+
+            idx_actuated_joint.append(act_joint_idx)
 
             # Get the transform from the parent joint to the current joint.
             # Do this for all the joints.
@@ -109,7 +109,7 @@ class JaxKinTree:
                 parent_joint = joint_from_child[joint.parent]
                 parent_index = urdf.joint_names.index(parent_joint.name)
                 if parent_index >= joint_idx:
-                    warnings.warn(
+                    logger.warning(
                         f"Parent index {parent_index} >= joint index {joint_idx}! " +
                         "Assuming that parent is root."
                     )
@@ -205,11 +205,15 @@ class JaxKinTree:
 @jdc.pytree_dataclass
 class JaxCollKinematics(JaxKinTree):
     """A differentiable, collision-aware robot kinematics model."""
-    _spheres: CollBody
+    link_names: jdc.Static[tuple[str]]
+
+    _collbody: CollBody
     """Collision body for the robot."""
 
-    _coll_link_to_joint: Int[Array, "colls"]
-    """Mapping from collision spheres to links."""
+    _list_coll_parent_joint: Int[Array, "colls"]
+    """Mapping from collision spheres to the immediate parent joint."""
+
+    _collbody_link_idx: Int[Array, "colls"]
 
     _coll_mat: Int[Array, "colls colls"]
     """Collision matrix, defined on per-sphere basis."""
@@ -231,9 +235,10 @@ class JaxCollKinematics(JaxKinTree):
             ignore_immediate_parent: If True, ignore collisions between parent and child links.
         """
         # scrape the collision data.
-        coll_link_to_joint = []
+        list_coll_parent_joint = []
         list_coll_link_body: list[CollBody] = []
         coll_link_names = []
+        collbody_link_idx = []
         if self_coll_ignore is None:
             self_coll_ignore = []
 
@@ -252,7 +257,7 @@ class JaxCollKinematics(JaxKinTree):
                 continue
 
             coll_link_mesh = trimesh.Trimesh()
-            print(f"Found collision mesh for {curr_link}.")
+            logger.info("Found collision mesh for {}.", curr_link)
             for coll in coll_mesh_list:
                 # Handle different geometry types.
                 coll_mesh: Optional[trimesh.Trimesh] = None
@@ -283,21 +288,22 @@ class JaxCollKinematics(JaxKinTree):
             assert isinstance(coll_link_mesh, trimesh.Trimesh), type(coll_link_mesh)
             coll_body = coll_type.from_trimesh(coll_link_mesh)
             n_pts = len(coll_body)
-            coll_link_to_joint.append([joint_idx] * n_pts)
+            list_coll_parent_joint.append([joint_idx] * n_pts)
             list_coll_link_body.append(coll_body)
-            coll_link_names.append([curr_link] * n_pts)
+            coll_link_names.append(curr_link)
+            collbody_link_idx.append([len(coll_body)] * n_pts)
 
             # Add the parent/child link to the allowed collision list.
             if ignore_immediate_parent:
                 self_coll_ignore.append((joint.parent, curr_link))
 
-        coll_link_to_joint = jnp.array(sum(coll_link_to_joint, []))
+        list_coll_parent_joint = jnp.array(sum(list_coll_parent_joint, []))
         coll_body = cast(CapsuleColl, sum(list_coll_link_body))
         n_pts = len(coll_body)
-        assert coll_link_to_joint.shape[0] == n_pts
+        assert list_coll_parent_joint.shape[0] == n_pts
 
         # Calculate the allowed collision matrix.
-        coll_link_names = sum(coll_link_names, [])
+        collbody_link_idx = sum(collbody_link_idx, [])
 
         def check_coll(i: int, j: int) -> bool:
             """Remove self- and adjacent link collisions."""
@@ -305,13 +311,13 @@ class JaxCollKinematics(JaxKinTree):
                 return False
 
             if (
-                urdf.link_map[coll_link_names[i]].name,
-                urdf.link_map[coll_link_names[j]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
             ) in self_coll_ignore:
                 return False
             if (
-                urdf.link_map[coll_link_names[j]].name,
-                urdf.link_map[coll_link_names[i]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
             ) in self_coll_ignore:
                 return False
 
@@ -325,7 +331,7 @@ class JaxCollKinematics(JaxKinTree):
         )
         assert coll_mat.shape == (n_pts, n_pts)
 
-        print(f"Found {n_pts} collision bodies.")
+        logger.info(f"Found {n_pts} collision bodies.")
 
         jax_urdf = JaxKinTree.from_urdf(urdf)
         return JaxCollKinematics(
@@ -338,9 +344,11 @@ class JaxCollKinematics(JaxKinTree):
             limits_lower=jnp.array(jax_urdf.limits_lower),
             limits_upper=jnp.array(jax_urdf.limits_upper),
             parent_indices=jnp.array(jax_urdf.parent_indices),
-            _coll_link_to_joint=coll_link_to_joint,
-            _spheres=coll_body,
+            _list_coll_parent_joint=list_coll_parent_joint,
+            link_names=tuple(coll_link_names),
+            _collbody=coll_body,
             _coll_mat=coll_mat,
+            _collbody_link_idx=jnp.array(collbody_link_idx),
         )
 
     @jdc.jit
@@ -386,6 +394,14 @@ class JaxCollKinematics(JaxKinTree):
         Ts_world_joint = self.forward_kinematics(cfg)
         assert Ts_world_joint.shape == (*batch_size, self.num_joints, 7)
 
-        return self._spheres.transform(
-            jaxlie.SE3(Ts_world_joint[..., self._coll_link_to_joint, :])
+        return self._collbody.transform(
+            jaxlie.SE3(Ts_world_joint[..., self._list_coll_parent_joint, :])
         )
+
+    def coll_weight(self, weights: dict[str, float], default: float = 1.0) -> Float[Array, "num_spheres"]:
+        """Get the collision weight for each sphere."""
+        coll_weights = jnp.full((len(self._collbody),), default)
+        for name, weight in weights.items():
+            idx = self.link_names.index(name)
+            coll_weights = jnp.where(self._collbody_link_idx == idx, weight, coll_weights)
+        return jnp.array(coll_weights)

@@ -76,7 +76,11 @@ def main(
 
     def coll_world(vals, var, target_tf):
         _target_coll = target_obj_coll.transform(target_tf)
-        return sdf_to_colldist(kin.d_world(cfg=vals[var], other=_target_coll)) * world_coll_weight
+        dist = sdf_to_colldist(kin.d_world(cfg=vals[var], other=_target_coll))
+        return (
+            dist * (kin._list_coll_parent_joint < 16) * world_coll_weight +
+            dist * (kin._list_coll_parent_joint > 16) * world_coll_weight * 0.01
+        )
 
     sphere_handle = None
     def solve_ik():
