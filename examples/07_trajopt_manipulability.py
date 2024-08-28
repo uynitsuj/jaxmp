@@ -13,8 +13,9 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.collbody import sdf_to_colldist
-from jaxmp.kinematics import JaxCollKinematics
+from jaxmp.collision_types import RobotColl
+from jaxmp.collision_sdf import dist_signed, colldist_from_sdf
+from jaxmp.kinematics import JaxKinTree
 
 def main(
     pos_weight: float = 5.0,
@@ -25,7 +26,10 @@ def main(
     manipulability_weight: float = 0.1,
 ):
     yourdf = load_robot_description("yumi_description")
-    kin = JaxCollKinematics.from_urdf(yourdf, self_coll_ignore=[
+    kin = JaxKinTree.from_urdf(yourdf)
+    robot_coll = RobotColl.from_urdf(
+        yourdf,
+        self_coll_ignore=[
         ('gripper_l_finger_l', 'gripper_l_finger_r'),
         ('gripper_r_finger_l', 'gripper_r_finger_r'),
     ])
@@ -111,7 +115,8 @@ def main(
         return (vals[var_curr] - vals[var_prev]) * smoothness_weight
 
     def self_coll_cost(vals, var):
-        return sdf_to_colldist(kin.d_self(cfg=vals[var])) * coll_weight / timesteps
+        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(cfg=vals[var])))
+        return colldist_from_sdf(dist_signed(coll, coll)).flatten() * coll_weight / timesteps
 
     # New cost: Manipulability.
     def manipulability_cost(vals, var, target_joint_idx: int):

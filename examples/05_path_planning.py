@@ -11,8 +11,9 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.collbody import sdf_to_colldist
-from jaxmp.kinematics import JaxCollKinematics
+from jaxmp.collision_types import RobotColl
+from jaxmp.collision_sdf import dist_signed, colldist_from_sdf
+from jaxmp.kinematics import JaxKinTree
 
 def main(
     pos_weight: float = 5.0,
@@ -23,13 +24,14 @@ def main(
     timesteps: int = 20,
 ):
     yourdf = load_robot_description("yumi_description")
-    kin = JaxCollKinematics.from_urdf(
+    robot_coll = RobotColl.from_urdf(
         yourdf,
         self_coll_ignore=[
             ('gripper_l_finger_l', 'gripper_l_finger_r'),
             ('gripper_r_finger_l', 'gripper_r_finger_r'),
         ]
     )
+    kin = JaxKinTree.from_urdf(yourdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     start_pose_r = jaxlie.SE3.from_rotation_and_translation(
@@ -71,14 +73,8 @@ def main(
         return (vals[var_curr] - vals[var_prev]) * smoothness_weight / (timesteps - 1)
 
     def coll_self(vals, var):
-        return sdf_to_colldist(kin.d_self(cfg=vals[var])) * coll_weight / timesteps
-
-    def coll_self_along_segment(vals, var_curr, var_prev, n_samples=5):
-        prev_cfg, curr_cfg = vals[var_prev], vals[var_curr]
-        return jnp.concatenate([
-            sdf_to_colldist(kin.d_self(cfg=(prev_cfg*t + curr_cfg*(1-t))))
-            for t in jnp.linspace(0, 1, n_samples)
-        ]) * (coll_weight / n_samples / timesteps)
+        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(cfg=vals[var])))
+        return colldist_from_sdf(dist_signed(coll, coll)).flatten() * coll_weight / timesteps
 
     # 1. First, calculate the start and end joint configurations.
     pose_vars = [JointVar(id=i) for i in range(2)]
@@ -118,8 +114,8 @@ def main(
         if tstep > 0:
             factors.extend([
                 jaxls.Factor.make(smoothness_cost, (traj_var, traj_vars[tstep - 1])),
-                jaxls.Factor.make(coll_self_along_segment, (traj_var, traj_vars[tstep - 1])),
             ])
+
     factors.extend([
         jaxls.Factor.make(ik_to_joint, (traj_vars[0], start_pose_l, joint_l_idx)),
         jaxls.Factor.make(ik_to_joint, (traj_vars[-1], end_pose_l, joint_l_idx)),

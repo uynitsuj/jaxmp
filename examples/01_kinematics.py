@@ -3,6 +3,7 @@ Tests robot forward + inverse kinematics using JaxMP.
 """
 
 import time
+import tyro
 
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
@@ -92,4 +93,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    tyro.cli(main)

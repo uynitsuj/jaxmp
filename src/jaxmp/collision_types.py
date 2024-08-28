@@ -4,18 +4,21 @@ Collision bodies for differentiable collision detection.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, Generic
-
 from abc import ABC, abstractmethod
+from typing import cast, TYPE_CHECKING, TypeVar, Generic, Optional
+
+from loguru import logger
+
 import trimesh
 import trimesh.bounds
-import numpy as onp
+import yourdfpy
 
 import jax
 from jax import Array
 import jax.numpy as jnp
+import numpy as onp
 
-from jaxtyping import Float
+from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 import jaxlie
 
@@ -23,7 +26,7 @@ import jaxlie
 if TYPE_CHECKING:
     import trimesh.nsphere
 
-T = TypeVar("T")
+T = TypeVar("T", bound="CollBody")
 
 class CollBody(ABC, Generic[T]):
     """Abstract base class for collision bodies."""
@@ -201,7 +204,7 @@ class CapsuleColl(CollBody):
         """Return the distance between two line segments ((a0, a1), (b0, b1)).
         Taken from https://stackoverflow.com/a/67102941, and ported to JAX.
         """
-        
+
         # Vector-vector distance.
         def _dist_between_seg(
             _a0: Float[Array, "3"],
@@ -360,158 +363,198 @@ class HalfSpaceColl(CollBody):
         return 1
 
 
-def sdf_to_colldist(
-    _dist: Float[Array, "n_dists"],
-    eta: float = 0.05,
-) -> Float[Array, "n_dists"]:
-    """
-    Convert a signed distance field to a collision distance field,
-    based on https://arxiv.org/pdf/2310.17274#page=7.39.
+@jdc.pytree_dataclass
+class RobotColl(CapsuleColl):
+    """Collision model for a robot, which can be put into different configurations."""
 
-    Args: 
-        dist: Signed distance field values, where sdf > 0 means collision (n_dists,).
-        eta: Distance threshold for the SDF.
+    link_names: jdc.Static[tuple[str]]
+    """Names of the links in the robot, length `links`."""
 
-    Returns:
-        Collision distance field values (n_dists,).
-    """
-    _dist = jnp.maximum(_dist, -eta)
-    _dist = jnp.where(
-        _dist > 0,
-        _dist + 0.5 * eta,
-        0.5 / eta * (_dist + eta)**2
-    )
-    _dist = jnp.maximum(_dist, 0.0)
-    return _dist
+    _idx_parent_joint: Int[Array, "link"]
+    """Index of the parent joint for each link."""
 
-def sdf_collbody(
-    coll_0: CollBody,
-    coll_1: CollBody,
-) -> Float[Array, "coll_0 coll_1"]:
-    """Distance between two collision bodies. sdf > 0 means collision."""
-    # Sphere-Sphere collision
-    if isinstance(coll_0, SphereColl) and isinstance(coll_1, SphereColl):
-        return _dist_sph_sph(coll_0, coll_1)
+    self_coll_matrix: Int[Array, "link link"]
+    """Collision matrix, where `coll_matrix[i, j] == 1`
+    if we account for the collision between collbodies `i` and `j`.
+    Else, `coll_matrix[i, j] == 0`."""
 
-    # Sphere-HalfSpace collision
-    elif isinstance(coll_0, SphereColl) and isinstance(coll_1, HalfSpaceColl):
-        return _dist_sph_halfspace(coll_0, coll_1)
-    elif isinstance(coll_1, SphereColl) and isinstance(coll_0, HalfSpaceColl):
-        return _dist_sph_halfspace(coll_1, coll_0).T
+    @staticmethod
+    def from_trimesh(mesh: trimesh.Trimesh):
+        raise NotImplementedError("RobotColl must be generated from a URDF.")
 
-    # Sphere-Plane collision
-    elif isinstance(coll_0, SphereColl) and isinstance(coll_1, PlaneColl):
-        return _dist_sph_plane(coll_0, coll_1)
-    elif isinstance(coll_1, SphereColl) and isinstance(coll_0, PlaneColl):
-        return _dist_sph_plane(coll_1, coll_0).T
+    @staticmethod
+    def from_urdf(
+        urdf: yourdfpy.URDF,
+        self_coll_ignore: Optional[list[tuple[str, str]]] = None,
+        ignore_immediate_parent: bool = True,
+    ):
+        """
+        Build a differentiable robot collision model from a URDF.
 
-    # Capsule-Capsule collision
-    elif isinstance(coll_0, CapsuleColl) and isinstance(coll_1, CapsuleColl):
-        return _dist_cap_cap(coll_0, coll_1)
+        Args:
+            urdf: The URDF object.
+            self_coll_ignore: List of tuples of link names that are allowed to collide.
+            ignore_immediate_parent: If True, ignore collisions between parent and child links.
+        """
 
-    # Sphere-Capsule collision
-    elif isinstance(coll_0, CapsuleColl) and isinstance(coll_1, SphereColl):
-        return _dist_sph_cap(coll_0, coll_1)
-    elif isinstance(coll_1, CapsuleColl) and isinstance(coll_0, SphereColl):
-        return _dist_sph_cap(coll_1, coll_0).T
+        # Re-load urdf, but with the collision data.
+        filename_handler = urdf._filename_handler  # pylint: disable=protected-access
+        urdf = yourdfpy.URDF(
+            robot=urdf.robot,
+            filename_handler=filename_handler,
+            load_collision_meshes=True,
+        )
 
-    # Capsule-HalfSpace collision
-    elif isinstance(coll_0, CapsuleColl) and isinstance(coll_1, HalfSpaceColl):
-        return _dist_cap_halfspace(coll_0, coll_1)
-    elif isinstance(coll_1, CapsuleColl) and isinstance(coll_0, HalfSpaceColl):
-        return _dist_cap_halfspace(coll_1, coll_0).T
+        # Gather all the collision links.
+        list_coll_link = list[CapsuleColl]()
+        idx_parent_joint = list[int]()
+        link_names = list[str]()
 
-    # Capsule-Plane collision
-    elif isinstance(coll_0, CapsuleColl) and isinstance(coll_1, PlaneColl):
-        return _dist_cap_plane(coll_0, coll_1)
-    elif isinstance(coll_1, CapsuleColl) and isinstance(coll_0, PlaneColl):
-        return _dist_cap_plane(coll_1, coll_0).T
+        if self_coll_ignore is None:
+            self_coll_ignore = []
 
-    else:
-        raise NotImplementedError(f"Collision between {type(coll_0)} and {type(coll_1)} not implemented.")
+        # Get all collision links.
+        for joint_idx, joint in enumerate(urdf.joint_map.values()):
+            curr_link = joint.child
+            assert curr_link in urdf.link_map
 
-def _dist_sph_sph(
-    sphere: SphereColl,
-    other: SphereColl,
-) -> Float[Array, "sph_0 sph_1"]:
-    """Return distance between two `Spheres`. sdf > 0 means collision."""
-    n_spheres_sph_0 = sphere.centers.shape[0]
-    n_spheres_sph_1 = other.centers.shape[0]
+            coll_link = RobotColl._get_coll_link(urdf, curr_link)
+            if coll_link is None:
+                continue
 
-    # Without the `+ 1e-7`, the jacobian becomes unstable / returns NaNs.
-    _dist = jnp.linalg.norm(
-        sphere.centers[:, None] - other.centers[None] + 1e-7, axis=-1
-    )
-    sdf = (sphere.radii[:, None] + other.radii[None]) - _dist
+            assert len(coll_link) == 1, "Only one collision primitive per link supported."
+            list_coll_link.append(coll_link)
+            idx_parent_joint.append(joint_idx)
+            link_names.append(curr_link)
+            
+            if ignore_immediate_parent:
+                self_coll_ignore.append((joint.parent, joint.child))
 
-    assert sdf.shape == (n_spheres_sph_0, n_spheres_sph_1)
-    return sdf
+        assert len(list_coll_link) > 0, "No collision links found in URDF."
+        logger.info("Found {} collision bodies", len(list_coll_link))
 
-def _dist_sph_plane(
-    sphere: SphereColl,
-    plane: PlaneColl,
-) -> Float[Array, "sph_0"]:
-    """Return the distance between a `Plane` and a point. sdf > 0 means collision."""
-    n_spheres = sphere.centers.shape[0]
-    _dist = jnp.abs(jnp.dot(sphere.centers - plane.point, plane.normal))
-    sdf = (sphere.radii - _dist)[:, None]
-    assert sdf.shape == (n_spheres, 1)
-    return sdf
+        coll_links = cast(CapsuleColl, sum(list_coll_link))
+        idx_parent_joint = jnp.array(idx_parent_joint)
+        link_names = tuple[str](link_names)
 
-def _dist_sph_halfspace(
-    sphere: SphereColl,
-    plane: HalfSpaceColl,
-) -> Float[Array, "sph_0"]:
-    """Return the distance between a halfspace and a point. sdf > 0 means collision."""
-    n_spheres = sphere.centers.shape[0]
-    _dist = jnp.dot(sphere.centers - plane.point, plane.normal)
-    sdf = (sphere.radii - _dist)[:, None]
-    assert sdf.shape == (n_spheres, 1)
-    return sdf
+        self_coll_matrix = RobotColl.create_self_coll_matrix(
+            urdf, link_names, idx_parent_joint, self_coll_ignore
+        )
+        assert self_coll_matrix.shape == (len(link_names), len(link_names))
 
-def _dist_cap_cap(
-    cap_0: CapsuleColl,
-    cap_1: CapsuleColl,
-) -> Float[Array, "cap_0 cap_1"]:
-    a0, a1 = cap_0.centerline
-    b0, b1 = cap_1.centerline
-    _dist = CapsuleColl.dist_between_seg(a0, a1, b0, b1)
-    sdf = (cap_0.radii[:, None] + cap_1.radii[None, :]) - _dist
-    assert sdf.shape == (cap_0.radii.shape[0], cap_1.radii.shape[0])
-    return sdf
+        return RobotColl(
+            radii=coll_links.radii,
+            heights=coll_links.heights,
+            tf=coll_links.tf,
+            link_names=link_names,
+            _idx_parent_joint=idx_parent_joint,
+            self_coll_matrix=self_coll_matrix,
+        )
 
-def _dist_sph_cap(
-    cap: CapsuleColl,
-    sph: SphereColl,
-) -> Float[Array, "cap sph"]:
-    a0, a1 = cap.centerline
-    _dist = CapsuleColl.dist_between_seg(a0, a1, sph.centers, sph.centers)
-    sdf = (cap.radii[:, None] + sph.radii[None, :]) - _dist
-    assert sdf.shape == (cap.radii.shape[0], sph.radii.shape[0])
-    return sdf
+    @staticmethod
+    def _get_coll_link(urdf: yourdfpy.URDF, curr_link: str) -> Optional[CapsuleColl]:
+        """
+        Get the `CapsuleColl` collision primitives for a given link.
+        """
+        filename_handler = urdf._filename_handler  # pylint: disable=protected-access
 
-def _dist_cap_plane(
-    cap: CapsuleColl,
-    plane: PlaneColl,
-) -> Float[Array, "cap 1"]:
-    a0, a1 = cap.centerline
-    t = jnp.dot(plane.point - a0, plane.normal) / (jnp.dot(a1 - a0, plane.normal) + 1e-7)
-    t = jnp.clip(t, 0.0, 1.0)
-    point = a0 + t[:, None] * (a1 - a0)
-    _dist = jnp.abs(jnp.dot(point - plane.point, plane.normal))
-    sdf = (cap.radii - _dist)[:, None]
-    assert sdf.shape == (cap.radii.shape[0], 1)
-    return sdf
+        coll_mesh_list = urdf.link_map[curr_link].collisions
+        if len(coll_mesh_list) == 0:
+            return None
 
-def _dist_cap_halfspace(
-    cap: CapsuleColl,
-    plane: HalfSpaceColl,
-) -> Float[Array, "cap"]:
-    a0, a1 = cap.centerline
-    t = jnp.dot(plane.point - a0, plane.normal) / (jnp.dot(a1 - a0, plane.normal) + 1e-7)
-    t = jnp.clip(t, 0.0, 1.0)
-    point = a0 + t[:, None] * (a1 - a0)
-    _dist = jnp.dot(point - plane.point, plane.normal)
-    sdf = (cap.radii - _dist)[:, None]
-    assert sdf.shape == (cap.radii.shape[0], 1)
-    return sdf
+        coll_link_mesh = trimesh.Trimesh()
+        for coll in coll_mesh_list:
+            # Handle different geometry types.
+            coll_mesh: Optional[trimesh.Trimesh] = None
+            geom = coll.geometry
+            if geom.box is not None:
+                coll_mesh = trimesh.creation.box(extents=geom.box.size)
+            elif geom.cylinder is not None:
+                coll_mesh = trimesh.creation.cylinder(
+                    radius=geom.cylinder.radius, height=geom.cylinder.length
+                )
+            elif geom.sphere is not None:
+                coll_mesh = trimesh.creation.icosphere(radius=geom.sphere.radius)
+            elif geom.mesh is not None:
+                coll_mesh = cast(
+                    trimesh.Trimesh,
+                    trimesh.load(
+                        file_obj=filename_handler(geom.mesh.filename),
+                        force="mesh"
+                    ),
+                )
+                coll_mesh.fix_normals()
+
+            if coll_mesh is None:
+                raise ValueError(f"No collision mesh found for {curr_link}!")
+            coll_link_mesh = coll_link_mesh + coll_mesh
+
+        # Create the collision spheres.
+        assert isinstance(coll_link_mesh, trimesh.Trimesh), type(coll_link_mesh)
+        coll_link = CapsuleColl.from_trimesh(coll_link_mesh)
+        return coll_link
+
+    def coll_weight(
+        self,
+        weights: dict[str, float],
+        default: float = 1.0
+    ) -> Float[Array, "links"]:
+        """Get the collision weight for each sphere."""
+        coll_weights = jnp.full((len(self),), default)
+        for name, weight in weights.items():
+            idx = self.link_names.index(name)
+            coll_weights = coll_weights.at[idx].set(weight)
+        return jnp.array(coll_weights)
+
+    def transform(self, tf: jaxlie.SE3) -> RobotColl:
+        """Re-configure the robot using the robot joint, derived w/ forward kinematics."""
+        Ts_world_joint = tf.wxyz_xyz  # pylint: disable=invalid-name
+        transformed_caps = super(RobotColl, self).transform(
+            jaxlie.SE3(Ts_world_joint[..., self._idx_parent_joint, :])
+        )
+        return RobotColl(
+            radii=transformed_caps.radii,
+            heights=transformed_caps.heights,
+            tf=transformed_caps.tf,
+            link_names=self.link_names,
+            _idx_parent_joint=self._idx_parent_joint,
+            self_coll_matrix=self.self_coll_matrix,
+        )
+
+    @staticmethod
+    def create_self_coll_matrix(
+        urdf: yourdfpy.URDF,
+        coll_link_names: tuple[str],
+        collbody_link_idx: Int[Array, "link"],
+        self_coll_ignore: list[tuple[str, str]],
+    ) -> Int[Array, "link link"]:
+        """
+        Create a collision matrix for the robot, where `coll_matrix[i, j] == 1`.
+        """
+        def check_coll(i: int, j: int) -> bool:
+            """Remove self- and adjacent link collisions."""
+            if i == j:
+                return False
+
+            if (
+                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
+            ) in self_coll_ignore:
+                return False
+            if (
+                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
+                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
+            ) in self_coll_ignore:
+                return False
+
+            return True
+
+        n_links = len(collbody_link_idx)
+        coll_mat = jnp.array(
+            [
+                [check_coll(i, j) for j in range(n_links)]
+                for i in range(n_links)
+            ]
+        )
+        assert coll_mat.shape == (n_links, n_links)
+        return coll_mat

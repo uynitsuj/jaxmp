@@ -15,7 +15,7 @@ import viser.extras
 
 import jaxls
 
-from jaxmp.collbody import SphereColl, sdf_to_colldist
+from jaxmp.collision import SphereColl, sdf_to_colldist
 from jaxmp.kinematics import JaxCollKinematics
 
 def main(
@@ -77,10 +77,19 @@ def main(
     def coll_world(vals, var, target_tf):
         _target_coll = target_obj_coll.transform(target_tf)
         dist = sdf_to_colldist(kin.d_world(cfg=vals[var], other=_target_coll))
-        return (
-            dist * (kin._list_coll_parent_joint < 16) * world_coll_weight +
-            dist * (kin._list_coll_parent_joint > 16) * world_coll_weight * 0.01
+        weighted_dist = dist * kin.coll_weight(
+            {
+                "gripper_l_finger_l": 0.01,
+                "gripper_l_finger_r": 0.01,
+                "gripper_r_finger_l": 0.01,
+                "gripper_r_finger_r": 0.01,
+            }
         )
+        return weighted_dist
+
+    # Something to make sure that the middle pose is actually the end effector pose
+    def in_grasp(vals, var, target_tf):
+        pass
 
     sphere_handle = None
     def solve_ik():

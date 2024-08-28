@@ -4,6 +4,10 @@ Similar to 01_kinematics.py, but with collision detection.
 
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
+import viser
+import viser.extras
+import time
+
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -11,8 +15,9 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.collbody import sdf_to_colldist, PlaneColl, SphereColl, HalfSpaceColl
-from jaxmp.kinematics import JaxCollKinematics
+from jaxmp.collision_sdf import colldist_from_sdf, dist_signed
+from jaxmp.collision_types import HalfSpaceColl, RobotColl
+from jaxmp.kinematics import JaxKinTree
 
 def main(
     pos_weight: float = 2.0,
@@ -22,20 +27,16 @@ def main(
     coll_weight: float = 1.0,
     world_coll_weight: float = 10.0,
 ):
-    urdf = load_robot_description("panda_description")
-    kin = JaxCollKinematics.from_urdf(
+    urdf = load_robot_description("yumi_description")
+    robot_coll = RobotColl.from_urdf(
         urdf,
-        # SphereColl,
         self_coll_ignore=[
             ("gripper_l_finger_l", "gripper_l_finger_r"),
             ("gripper_r_finger_l", "gripper_r_finger_r"),
         ]
-    )  # JaxKinematics -> JaxCollKinematics!
+    )
+    kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
-
-    import viser
-    import viser.extras
-    import time
 
     server = viser.ViserServer()
 
@@ -45,7 +46,7 @@ def main(
     target_frame_handle = server.scene.add_frame("target", axes_length=0.1)
 
     # Show target joint name, and current joint positions.
-    visualize_spheres = server.gui.add_checkbox("Show spheres", initial_value=False)
+    visualize_spheres = server.gui.add_checkbox("Show Collbody", initial_value=False)
     target_name_handle = server.gui.add_dropdown(
         "target joint",
         list(urdf.joint_names),
@@ -78,10 +79,14 @@ def main(
 
     # New cost, for collision detection.
     def coll_self(vals, var):
-        return sdf_to_colldist(kin.d_self(cfg=vals[var])) * coll_weight
+        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(vals[var])))
+        sdf = dist_signed(coll, coll).flatten()
+        return colldist_from_sdf(sdf) * coll_weight
 
     def coll_world(vals, var):
-        return sdf_to_colldist(kin.d_world(cfg=vals[var], other=obstacle)) * world_coll_weight
+        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(vals[var])))
+        sdf = dist_signed(coll, obstacle).flatten()
+        return colldist_from_sdf(sdf) * world_coll_weight
 
     sphere_handle = None
     def solve_ik():
@@ -118,12 +123,13 @@ def main(
         target_frame_handle.position = onp.array(T_target_world)[4:]
         target_frame_handle.wxyz = onp.array(T_target_world)[:4]
 
-        self_coll_value.value = kin.d_self(cfg=joints).max().item()
-        world_coll_value.value = kin.d_world(cfg=joints, other=obstacle).max().item()
+        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)))
+        self_coll_value.value = dist_signed(coll, coll).max().item()
+        world_coll_value.value = dist_signed(coll, obstacle).max().item()
         if visualize_spheres.value:
             sphere_handle = server.scene.add_mesh_trimesh(
-                "spheres",
-                kin.collbody(joints).to_trimesh()
+                "coll",
+                robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints))).to_trimesh()
             )
         elif sphere_handle is not None:
             sphere_handle.remove()

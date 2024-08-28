@@ -10,7 +10,8 @@ import jaxlie
 
 import viser
 
-from jaxmp.collbody import CollBody, PlaneColl, SphereColl, CapsuleColl, HalfSpaceColl, sdf_collbody
+from jaxmp.collision_types import CollBody, PlaneColl, SphereColl, CapsuleColl, HalfSpaceColl
+from jaxmp.collision_sdf import dist_signed
 
 def main():
     server = viser.ViserServer()
@@ -36,7 +37,7 @@ def main():
         for i in range(len(coll_list)):
             for j in range(i + 1, len(coll_list)):
                 try:
-                    if jnp.any(sdf_collbody(_coll_list[i], _coll_list[j]) > 0.0):
+                    if jnp.any(dist_signed(_coll_list[i], _coll_list[j]) > 0.0):
                         in_collision_list[i], in_collision_list[j] = True, True
                 except NotImplementedError:
                     # print("Collision not implemented", type(_coll_list[i]), type(_coll_list[j]))
