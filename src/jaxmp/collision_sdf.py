@@ -5,16 +5,18 @@ Supports World- and self- collision detection (returns signed distance).
 
 from __future__ import annotations
 
-from typing import Optional, cast
-
-import jax_dataclasses as jdc
-
 from jax import Array
-from jaxtyping import Int, Float
+from jaxtyping import Float
 import jax.numpy as jnp
 
-from jaxmp.collision_types import CollBody, SphereColl, CapsuleColl, PlaneColl, HalfSpaceColl, RobotColl
-
+from jaxmp.collision_types import (
+    CollBody,
+    SphereColl,
+    CapsuleColl,
+    PlaneColl,
+    HalfSpaceColl,
+    RobotColl
+)
 
 def colldist_from_sdf(
     _dist: Float[Array, "n_dists"],
@@ -40,7 +42,7 @@ def colldist_from_sdf(
     _dist = jnp.maximum(_dist, 0.0)
     return _dist
 
-def sdf_collbody(
+def dist_signed(
     coll_0: CollBody,
     coll_1: CollBody,
 ) -> Float[Array, "coll_0 coll_1"]:

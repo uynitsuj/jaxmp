@@ -23,7 +23,7 @@ def main(
     limit_weight: float = 100.0,
     smoothness_weight: float = 1.0,
     coll_weight: float = 10.0,
-    manipulability_weight: float = 0.1,
+    manipulability_weight: float = 1.0,
 ):
     yourdf = load_robot_description("yumi_description")
     kin = JaxKinTree.from_urdf(yourdf)
@@ -126,7 +126,7 @@ def main(
         jacobian = jax.jacfwd(kin.forward_kinematics)(joint_cfg)[target_joint_idx]
         norm = jnp.linalg.norm(jacobian, ord='nuc')
 
-        return jnp.maximum(7.0 - norm[None], 0.0) * manipulability_weight
+        return jnp.maximum(3.0 - norm[None], 0.0) * manipulability_weight
 
     traj_vars = [JointVar(id=i) for i in range(timesteps)] + [jaxls.SE3Var(id=timesteps)]
 

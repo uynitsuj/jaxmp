@@ -145,7 +145,7 @@ class JaxKinTree:
     @staticmethod
     def _get_act_joint_twist(joint: yourdfpy.Joint) -> Array:
         """Get the twist parameters for an actuated joint."""
-        if joint.type == "revolute":
+        if joint.type in ("revolute", "continuous"):
             twist = jnp.concatenate([jnp.zeros(3), joint.axis])
         elif joint.type == "prismatic":
             twist = jnp.concatenate([joint.axis, jnp.zeros(3)])
@@ -190,13 +190,19 @@ class JaxKinTree:
     @staticmethod
     def _get_joint_limits(joint: yourdfpy.Joint) -> tuple[float, float]:
         """Get the joint limits for an actuated joint, returns (lower, upper)."""
-        assert (
-            joint.limit is not None
-            and joint.limit.lower is not None
-            and joint.limit.upper is not None
-        ), "We currently assume there are joint limits!"
-        lower = joint.limit.lower
-        upper = joint.limit.upper
+        assert joint.limit is not None
+        if (
+            joint.limit.lower is not None and
+            joint.limit.upper is not None
+        ):
+            lower = joint.limit.lower
+            upper = joint.limit.upper
+        elif joint.type == "continuous":
+            logger.warning("Continuous joint detected, cap to [-pi, pi] limits.")
+            lower = -jnp.pi
+            upper = jnp.pi
+        else:
+            raise ValueError("We currently assume there are joint limits!")
         return lower, upper
 
     @jdc.jit

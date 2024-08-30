@@ -4,8 +4,6 @@ Similar to 01_kinematics.py, but with collision detection.
 
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
-import viser
-import viser.extras
 import time
 
 import jax
@@ -15,9 +13,13 @@ import numpy as onp
 
 import jaxls
 
-from jaxmp.collision_sdf import colldist_from_sdf, dist_signed
+import viser
+import viser.extras
+
+from jaxmp.collision_sdf import dist_signed
 from jaxmp.collision_types import HalfSpaceColl, RobotColl
 from jaxmp.kinematics import JaxKinTree
+from jaxmp.robot_factors import RobotFactors
 
 def main(
     pos_weight: float = 2.0,
@@ -36,6 +38,7 @@ def main(
         ]
     )
     kin = JaxKinTree.from_urdf(urdf)
+    robot_factors = RobotFactors(kin, coll=robot_coll)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     server = viser.ViserServer()
@@ -62,32 +65,6 @@ def main(
     # Create factor graph.
     class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
 
-    def ik_to_joint(vals: jaxls.VarValues, var: JointVar, target_pose: jaxlie.SE3, target_joint_idx: int):
-        joint_cfg: jax.Array = vals[var]
-        pose_res = (
-            jaxlie.SE3(kin.forward_kinematics(joint_cfg)[target_joint_idx]).inverse()
-            @ target_pose
-        ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
-        return pose_res
-
-    def limit_cost(vals, var):
-        joint_cfg: jax.Array = vals[var]
-        return (
-            jnp.maximum(0.0, joint_cfg - kin.limits_upper) +
-            jnp.maximum(0.0, kin.limits_lower - joint_cfg)
-        ) * limit_weight
-
-    # New cost, for collision detection.
-    def coll_self(vals, var):
-        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(vals[var])))
-        sdf = dist_signed(coll, coll).flatten()
-        return colldist_from_sdf(sdf) * coll_weight
-
-    def coll_world(vals, var):
-        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(vals[var])))
-        sdf = dist_signed(coll, obstacle).flatten()
-        return colldist_from_sdf(sdf) * world_coll_weight
-
     sphere_handle = None
     def solve_ik():
         nonlocal sphere_handle
@@ -98,11 +75,41 @@ def main(
 
         graph = jaxls.FactorGraph.make(
             [
-                jaxls.Factor.make(ik_to_joint, (joint_vars[0], target_pose, target_joint_idx)),
-                jaxls.Factor.make(limit_cost, (joint_vars[0],)),
-                jaxls.Factor.make(coll_self, (joint_vars[0],)),
-                jaxls.Factor.make(coll_world, (joint_vars[0],)),
-                jaxls.Factor.make(lambda vals, var: (vals[var] - rest_pose) * rest_weight, (joint_vars[0],)),
+                jaxls.Factor.make(
+                    robot_factors.ik_cost,
+                    (
+                        joint_vars[0],
+                        target_pose,
+                        target_joint_idx,
+                        jnp.array([pos_weight] * 3 + [rot_weight] * 3),
+                    ),
+                ),
+                jaxls.Factor.make(
+                    robot_factors.limit_cost,
+                    (
+                        joint_vars[0],
+                        jnp.array([limit_weight] * kin.num_actuated_joints),
+                    ),
+                ),
+                jaxls.Factor.make(
+                    robot_factors.self_coll_cost,
+                    (joint_vars[0], jnp.array([coll_weight] * len(robot_coll))),
+                ),
+                jaxls.Factor.make(
+                    robot_factors.world_coll_cost,
+                    (
+                        joint_vars[0],
+                        obstacle,
+                        jnp.array([world_coll_weight] * len(robot_coll)),
+                    ),
+                ),
+                jaxls.Factor.make(
+                    robot_factors.rest_cost,
+                    (
+                        joint_vars[0],
+                        jnp.array([rest_weight] * kin.num_actuated_joints),
+                    ),
+                ),
             ],
             joint_vars,
             verbose=False,
@@ -111,7 +118,7 @@ def main(
             initial_vals=jaxls.VarValues.make(joint_vars, [rest_pose]),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
-            # verbose=False,
+            verbose=False,
         )
         joints = solution[joint_vars[0]]
         T_target_world = jaxlie.SE3(  # pylint: disable=invalid-name

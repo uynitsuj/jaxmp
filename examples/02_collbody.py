@@ -18,11 +18,21 @@ def main():
 
     coll_list: list[CollBody] = [
         PlaneColl(point=jnp.array([0.0, 0.0, 0.0]), normal=jnp.array([0.0, 0.0, 1.0])),
-        HalfSpaceColl(point=jnp.array([0.0, 0.0, 0.0]), normal=jnp.array([0.0, 0.0, 1.0])),
+        HalfSpaceColl(
+            point=jnp.array([0.0, 0.0, 0.0]), normal=jnp.array([0.0, 0.0, 1.0])
+        ),
         SphereColl(centers=jnp.array([[0.0, 0.0, 0.0]]), radii=jnp.array([0.2])),
         SphereColl(centers=jnp.array([[0.0, 0.0, 0.0]]), radii=jnp.array([0.2])),
-        CapsuleColl(radii=jnp.array([0.2]), heights=jnp.array([0.5]), tf=jaxlie.SE3.identity(batch_axes=(1,)),),
-        CapsuleColl(radii=jnp.array([0.2]), heights=jnp.array([0.5]), tf=jaxlie.SE3.identity(batch_axes=(1,)),),
+        CapsuleColl(
+            radii=jnp.array([0.2]),
+            heights=jnp.array([0.5]),
+            tf=jaxlie.SE3.identity(batch_axes=(1,)),
+        ),
+        CapsuleColl(
+            radii=jnp.array([0.2]),
+            heights=jnp.array([0.5]),
+            tf=jaxlie.SE3.identity(batch_axes=(1,)),
+        ),
     ]
     handle_list = [server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))]
 
@@ -40,7 +50,6 @@ def main():
                     if jnp.any(dist_signed(_coll_list[i], _coll_list[j]) > 0.0):
                         in_collision_list[i], in_collision_list[j] = True, True
                 except NotImplementedError:
-                    # print("Collision not implemented", type(_coll_list[i]), type(_coll_list[j]))
                     pass
 
         # Visualize.
