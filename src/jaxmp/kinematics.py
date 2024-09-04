@@ -9,7 +9,7 @@ Includes:
 
 from __future__ import annotations
 
-from typing import Optional
+from copy import deepcopy
 
 import jax
 import jax_dataclasses as jdc
@@ -20,6 +20,37 @@ from loguru import logger
 from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float, Int
+
+
+# sorter for joint_map, when the ordering is not in topology order.
+def sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
+    """Return a sorted robot, with the joint map in topological order."""
+    joints = deepcopy(urdf.robot.joints)
+
+    # Sort the joints in topological order.
+    sorted_joints = list[yourdfpy.Joint]()
+    joint_from_child = {j.child: j for j in joints}
+    while joints:
+        for j in joints:
+            if j.parent not in joint_from_child:
+                sorted_joints.append(j)
+                joints.remove(j)
+                joint_from_child.pop(j.child)
+                break
+        else:
+            raise ValueError("Cycle detected in URDF!")
+
+    # Update the joints.
+    robot = deepcopy(urdf.robot)
+    robot.joints = sorted_joints
+
+    # Re-load urdf, with the updated robot.
+    filename_handler = urdf._filename_handler  # pylint: disable=protected-access
+    updated_urdf = yourdfpy.URDF(
+        robot=robot,
+        filename_handler=filename_handler,
+    )
+    return updated_urdf
 
 
 @jdc.pytree_dataclass
@@ -128,7 +159,7 @@ class JaxKinTree:
             mimicked_joint = urdf.joint_map[joint.mimic.joint]
             mimicked_joint_idx = urdf.actuated_joints.index(mimicked_joint)
             assert mimicked_joint_idx < joint_idx, "Code + fk `fori_loop` assumes this!"
-            logger.warning("Mimic joint detected.") 
+            logger.warning("Mimic joint detected.")
             act_joint_idx = urdf.actuated_joints.index(mimicked_joint)
 
         # Track joint twists for actuated joints.

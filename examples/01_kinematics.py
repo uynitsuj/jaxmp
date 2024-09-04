@@ -16,7 +16,7 @@ import jaxls
 import viser
 import viser.extras
 
-from jaxmp.kinematics import JaxKinTree
+from jaxmp.kinematics import JaxKinTree, sort_joint_map
 from jaxmp.robot_factors import RobotFactors
 
 def main(
@@ -27,6 +27,8 @@ def main(
     limit_weight: float = 100.0,
 ):
     urdf = load_robot_description(robot_description)
+    urdf = sort_joint_map(urdf)
+
     kin = JaxKinTree.from_urdf(urdf)
     robot_factors = RobotFactors(kin)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
