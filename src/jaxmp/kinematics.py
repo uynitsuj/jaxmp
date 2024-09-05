@@ -284,3 +284,17 @@ class JaxKinTree:
         )
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 7)
         return Ts_world_joint
+
+    def normalize_joints(
+        self, cfg: Float[Array, "*batch num_act_joints"]
+    ) -> Float[Array, "*batch num_act_joints"]:
+        """Map joint values to the range [-1, 1]."""
+        return cfg
+        # return 2 * (cfg - self.limits_lower) / (self.limits_upper - self.limits_lower) - 1
+
+    def unnormalize_joints(
+        self, norm_cfg: Float[Array, "*batch num_act_joints"]
+    ) -> Float[Array, "*batch num_act_joints"]:
+        """Map normalized joint values ([-1, 1]) back to the original joint values."""
+        return norm_cfg
+        # return 0.5 * (norm_cfg + 1) * (self.limits_upper - self.limits_lower) + self.limits_lower

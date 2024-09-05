@@ -30,7 +30,8 @@ class RobotFactors:
         weights: Array,
     ) -> Array:
         """Pose cost."""
-        joint_cfg: jax.Array = vals[var]
+        norm_joint_cfg: jax.Array = vals[var]
+        joint_cfg = self.kin.unnormalize_joints(norm_joint_cfg)
         Ts_joint_world = self.kin.forward_kinematics(joint_cfg)
         residual = (
             jaxlie.SE3(Ts_joint_world[target_joint_idx]).inverse()
@@ -46,7 +47,8 @@ class RobotFactors:
         weights: Array,
     ) -> Array:
         """Limit cost."""
-        joint_cfg: jax.Array = vals[var]
+        norm_joint_cfg: jax.Array = vals[var]
+        joint_cfg = self.kin.unnormalize_joints(norm_joint_cfg)
         residual = (
             jnp.maximum(0.0, joint_cfg - self.kin.limits_upper) +
             jnp.maximum(0.0, self.kin.limits_lower - joint_cfg)
@@ -73,7 +75,8 @@ class RobotFactors:
     ) -> Array:
         """Collision-scaled dist for self-collision."""
         assert self.coll is not None
-        coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(vals[var])))
+        joint_cfg = self.kin.unnormalize_joints(vals[var])
+        coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(joint_cfg)))
         sdf = dist_signed(coll, coll)
         weights = weights[:, None] * weights[None, :]
         assert sdf.shape == weights.shape
@@ -88,7 +91,8 @@ class RobotFactors:
     ) -> Array:
         """Collision-scaled dist for world collisio."""
         assert self.coll is not None
-        coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(vals[var])))
+        joint_cfg = self.kin.unnormalize_joints(vals[var])
+        coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(joint_cfg)))
         sdf = dist_signed(coll, other).flatten()
         assert sdf.shape == weights.shape
         return colldist_from_sdf(sdf) * weights

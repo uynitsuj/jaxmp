@@ -438,7 +438,7 @@ class RobotColl(CapsuleColl):
         link_names = tuple[str](link_names)
 
         self_coll_matrix = RobotColl.create_self_coll_matrix(
-            urdf, link_names, idx_parent_joint, self_coll_ignore
+            urdf, link_names, self_coll_ignore
         )
         assert self_coll_matrix.shape == (len(link_names), len(link_names))
 
@@ -525,7 +525,6 @@ class RobotColl(CapsuleColl):
     def create_self_coll_matrix(
         urdf: yourdfpy.URDF,
         coll_link_names: tuple[str],
-        collbody_link_idx: Int[Array, "link"],
         self_coll_ignore: list[tuple[str, str]],
     ) -> Int[Array, "link link"]:
         """
@@ -537,19 +536,19 @@ class RobotColl(CapsuleColl):
                 return False
 
             if (
-                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
-                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
+                urdf.link_map[coll_link_names[i]].name,
+                urdf.link_map[coll_link_names[j]].name,
             ) in self_coll_ignore:
                 return False
             if (
-                urdf.link_map[coll_link_names[collbody_link_idx[j]]].name,
-                urdf.link_map[coll_link_names[collbody_link_idx[i]]].name,
+                urdf.link_map[coll_link_names[j]].name,
+                urdf.link_map[coll_link_names[i]].name,
             ) in self_coll_ignore:
                 return False
 
             return True
 
-        n_links = len(collbody_link_idx)
+        n_links = len(coll_link_names)
         coll_mat = jnp.array(
             [
                 [check_coll(i, j) for j in range(n_links)]

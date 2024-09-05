@@ -4,6 +4,7 @@ Similar to 01_kinematics.py, but with collision detection.
 
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
+import tyro
 import time
 
 import jax
@@ -18,18 +19,21 @@ import viser.extras
 
 from jaxmp.collision_sdf import dist_signed
 from jaxmp.collision_types import HalfSpaceColl, RobotColl
-from jaxmp.kinematics import JaxKinTree
+from jaxmp.kinematics import JaxKinTree, sort_joint_map
 from jaxmp.robot_factors import RobotFactors
 
 def main(
+    robot_description: str = "yumi_description",
     pos_weight: float = 2.0,
     rot_weight: float = 0.5,
     limit_weight: float = 100.0,
-    rest_weight: float = 0.1,
+    rest_weight: float = 0.001,
     coll_weight: float = 1.0,
     world_coll_weight: float = 10.0,
 ):
-    urdf = load_robot_description("yumi_description")
+    urdf = load_robot_description(robot_description)
+    urdf = sort_joint_map(urdf)
+
     robot_coll = RobotColl.from_urdf(
         urdf,
         self_coll_ignore=[
@@ -63,12 +67,12 @@ def main(
     world_coll_value = server.gui.add_number("max. coll dist (world)", 0.0, step=0.01, disabled=True)
 
     # Create factor graph.
-    class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
+    class NormJointVar(jaxls.Var[jax.Array], default=kin.normalize_joints(rest_pose)): ...
 
     sphere_handle = None
     def solve_ik():
         nonlocal sphere_handle
-        joint_vars = [JointVar(id=0)]
+        joint_vars = [NormJointVar(id=0)]
 
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
@@ -115,12 +119,12 @@ def main(
             verbose=False,
         )
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [rest_pose]),
+            initial_vals=jaxls.VarValues.make(joint_vars, [NormJointVar.default]),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             verbose=False,
         )
-        joints = solution[joint_vars[0]]
+        joints = kin.unnormalize_joints(solution[joint_vars[0]])
         T_target_world = jaxlie.SE3(  # pylint: disable=invalid-name
             kin.forward_kinematics(joints)[target_joint_idx]
         ).wxyz_xyz
@@ -147,4 +151,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    tyro.cli(main)
