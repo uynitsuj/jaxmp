@@ -13,6 +13,7 @@ import numpy as onp
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
+from jaxmp.robot_factors import RobotFactors
 
 def main(
     pos_weight: float = 5.0,
@@ -20,35 +21,23 @@ def main(
     limit_weight: float = 100.0,
     smoothness_weight: float = 1.0
 ):
-    yourdf = load_robot_description("yumi_description")
-    kin = JaxKinTree.from_urdf(yourdf)
+    urdf = load_robot_description("yumi_description")
+    kin = JaxKinTree.from_urdf(urdf)
     trajectory = onp.load(
         Path(__file__).parent / "assets/yumi_trajectory.npy",
         allow_pickle=True
     ).item()  # {'joint_name': [time, wxyz_xyz]}
     timesteps = list(trajectory.values())[0].shape[0]
-
+    robot_factors = RobotFactors(kin)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
-    class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
-
-    def ik_to_joint(vals: jaxls.VarValues, var: JointVar, target_pose: jaxlie.SE3, target_joint_idx: int):
-        joint_cfg: jax.Array = vals[var]
-        pose_res = (
-            jaxlie.SE3(kin.forward_kinematics(joint_cfg)[target_joint_idx]).inverse()
-            @ target_pose
-        ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
-        return pose_res
-
-    def limit_cost(vals, var):
-        joint_cfg: jax.Array = vals[var]
-        return (
-            jnp.maximum(0.0, joint_cfg - kin.limits_upper) +
-            jnp.maximum(0.0, kin.limits_lower - joint_cfg)
-        ) * limit_weight
-
-    def smoothness_cost(vals, var_curr, var_prev):
-        return (vals[var_curr] - vals[var_prev]) * smoothness_weight
+    # Create factor graph.
+    class JointVar(
+        jaxls.Var[jax.Array],
+        default=rest_pose,
+        tangent_dim=kin.num_actuated_joints,
+        retract_fn=kin.get_retract_fn(),
+    ): ...
 
     traj_vars = [JointVar(id=i) for i in range(timesteps)]
 
@@ -56,18 +45,41 @@ def main(
     list_target_joint_idx = [kin.joint_names.index(joint_name) for joint_name in trajectory.keys()]
     for tstep in range(timesteps):
         for idx, joint_name in zip(list_target_joint_idx, trajectory.keys()):
-            factors.extend([
-                jaxls.Factor.make(
-                    ik_to_joint, (traj_vars[tstep], jaxlie.SE3(trajectory[joint_name][tstep]), idx),
-                )
-            ])
-        factors.extend([
-            jaxls.Factor.make(
-                limit_cost, (traj_vars[tstep],),
+            factors.extend(
+                [
+                    jaxls.Factor.make(
+                        robot_factors.ik_cost,
+                        (
+                            traj_vars[tstep],
+                            jaxlie.SE3(trajectory[joint_name][tstep]),
+                            idx,
+                            jnp.array([pos_weight] * 3 + [rot_weight] * 3),
+                        ),
+                    )
+                ]
             )
-        ])
+        factors.extend(
+            [
+                jaxls.Factor.make(
+                    robot_factors.limit_cost,
+                    (
+                        traj_vars[tstep],
+                        jnp.array([limit_weight] * kin.num_actuated_joints),
+                    ),
+                )
+            ]
+        )
         if tstep > 0:
-            factors.append(jaxls.Factor.make( smoothness_cost, (traj_vars[tstep], traj_vars[tstep - 1]),))
+            factors.append(
+                jaxls.Factor.make(
+                    robot_factors.smoothness_cost,
+                    (
+                        traj_vars[tstep],
+                        traj_vars[tstep - 1],
+                        jnp.array([smoothness_weight] * kin.num_actuated_joints),
+                    ),
+                )
+            )
 
     graph = jaxls.FactorGraph.make(
         factors,
@@ -85,7 +97,7 @@ def main(
     import time
 
     server = viser.ViserServer()
-    urdf_orig = viser.extras.ViserUrdf(server, yourdf, root_node_name="/urdf")
+    urdf_orig = viser.extras.ViserUrdf(server, urdf, root_node_name="/urdf")
 
     # Visualize!
     slider = server.gui.add_slider(

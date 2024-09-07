@@ -8,7 +8,6 @@ from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import time
 import tyro
-
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -19,7 +18,7 @@ import jaxls
 import viser
 import viser.extras
 
-from jaxmp.kinematics import JaxKinTree
+from jaxmp.kinematics import JaxKinTree, sort_joint_map
 from jaxmp.robot_factors import RobotFactors
 
 def main(
@@ -31,6 +30,7 @@ def main(
     manipulability_weight: float = 0.01,
 ):
     urdf = load_robot_description(robot_description)
+    urdf = sort_joint_map(urdf)
     kin = JaxKinTree.from_urdf(urdf)
     robot_factors = RobotFactors(kin)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
@@ -53,7 +53,7 @@ def main(
     )
 
     # Create factor graph.
-    class JointVar(jaxls.Var[jax.Array], default=rest_pose): ...
+    class JointVar(jaxls.Var[jax.Array], default=rest_pose, tangent_dim=kin.num_actuated_joints, retract_fn=kin.get_retract_fn()): ...
 
     def solve_ik():
         joint_vars = [JointVar(id=0)]
@@ -125,13 +125,8 @@ def main(
         urdf_vis.update_cfg(onp.array(joints))
         urdf_vis_no_manip.update_cfg(onp.array(joints_no_manip))
 
-        jacobian = jax.jacfwd(kin.forward_kinematics)(joints)[target_joint_idx]
-        norm = jnp.linalg.norm(jacobian, ord='nuc')
-        manip_norm_handle.value = norm.item()
-
-        jacobian = jax.jacfwd(kin.forward_kinematics)(joints_no_manip)[target_joint_idx]
-        norm = jnp.linalg.norm(jacobian, ord='nuc')
-        manip_norm_no_handle.value = norm.item()
+        manip_norm_handle.value = robot_factors.manipulability(joints, target_joint_idx).item()
+        manip_norm_no_handle.value = robot_factors.manipulability(joints_no_manip, target_joint_idx).item()
 
         T_target_world = jaxlie.SE3(kin.forward_kinematics(joints)[target_joint_idx]).wxyz_xyz
         target_frame_handle.position = onp.array(T_target_world)[4:]

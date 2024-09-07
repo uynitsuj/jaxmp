@@ -2,12 +2,12 @@
 Similar to 01_kinematics.py, but with collision detection.
 """
 
+import time
+
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import tyro
-import time
 
-import jax
 import jax.numpy as jnp
 import jaxlie
 import numpy as onp
@@ -24,11 +24,11 @@ from jaxmp.robot_factors import RobotFactors
 
 def main(
     robot_description: str = "yumi_description",
-    pos_weight: float = 2.0,
+    pos_weight: float = 5.0,
     rot_weight: float = 0.5,
     limit_weight: float = 100.0,
-    rest_weight: float = 0.001,
-    coll_weight: float = 1.0,
+    rest_weight: float = 0.1,
+    coll_weight: float = 2.0,
     world_coll_weight: float = 10.0,
 ):
     urdf = load_robot_description(robot_description)
@@ -67,12 +67,12 @@ def main(
     world_coll_value = server.gui.add_number("max. coll dist (world)", 0.0, step=0.01, disabled=True)
 
     # Create factor graph.
-    class NormJointVar(jaxls.Var[jax.Array], default=kin.normalize_joints(rest_pose)): ...
+    JointVar = robot_factors.get_var_class(default_val=rest_pose)
 
-    sphere_handle = None
+    collbody_handle = None
     def solve_ik():
-        nonlocal sphere_handle
-        joint_vars = [NormJointVar(id=0)]
+        nonlocal collbody_handle
+        joint_vars = [JointVar(id=0)]
 
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
@@ -119,12 +119,12 @@ def main(
             verbose=False,
         )
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [NormJointVar.default]),
+            initial_vals=jaxls.VarValues.make(joint_vars, [JointVar.default]),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             verbose=False,
         )
-        joints = kin.unnormalize_joints(solution[joint_vars[0]])
+        joints = solution[joint_vars[0]]
         T_target_world = jaxlie.SE3(  # pylint: disable=invalid-name
             kin.forward_kinematics(joints)[target_joint_idx]
         ).wxyz_xyz
@@ -138,12 +138,12 @@ def main(
         self_coll_value.value = dist_signed(coll, coll).max().item()
         world_coll_value.value = dist_signed(coll, obstacle).max().item()
         if visualize_spheres.value:
-            sphere_handle = server.scene.add_mesh_trimesh(
+            collbody_handle = server.scene.add_mesh_trimesh(
                 "coll",
                 robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints))).to_trimesh()
             )
-        elif sphere_handle is not None:
-            sphere_handle.remove()
+        elif collbody_handle is not None:
+            collbody_handle.remove()
 
     while True:
         solve_ik()

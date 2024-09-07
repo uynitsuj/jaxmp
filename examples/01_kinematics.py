@@ -23,7 +23,7 @@ def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
     rot_weight: float = 0.5,
-    rest_weight: float = 0.001,
+    rest_weight: float = 0.1,
     limit_weight: float = 100.0,
 ):
     urdf = load_robot_description(robot_description)
@@ -48,10 +48,10 @@ def main(
     )
 
     # Create factor graph.
-    class NormJointVar(jaxls.Var[jax.Array], default=kin.normalize_joints(rest_pose)): ...
+    JointVar = robot_factors.get_var_class(default_val=rest_pose)
 
     def solve_ik():
-        joint_vars = [NormJointVar(id=0)]
+        joint_vars = [JointVar(id=0)]
 
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
@@ -86,11 +86,11 @@ def main(
             verbose=False,
         )
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [NormJointVar.default]),
+            initial_vals=jaxls.VarValues.make(joint_vars, [JointVar.default]),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
         )
-        joints = kin.unnormalize_joints(solution[joint_vars[0]])
+        joints = solution[joint_vars[0]]
         urdf_vis.update_cfg(onp.array(joints))
         T_target_world = kin.forward_kinematics(joints)[target_joint_idx]
         target_frame_handle.position = onp.array(T_target_world)[4:]

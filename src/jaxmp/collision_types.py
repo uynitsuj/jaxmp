@@ -22,6 +22,8 @@ from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 import jaxlie
 
+import jaxls
+
 
 if TYPE_CHECKING:
     import trimesh.nsphere
@@ -152,19 +154,84 @@ class CapsuleColl(CollBody):
 
         # If height is tall enough, we subtract the radius from the height.
         # Otherwise, we cap the two ends.
-        # TODO(cmk) optimize the capsule height.
         if height - 2 * radius > 0:
             height = height - 2 * radius
-        assert height > 0
+        else:
+            height = 0
 
         radius = onp.array([radius])
         height = onp.array([height])
         tf = jaxlie.SE3.from_matrix(tf_mat[None, ...])
 
-        return CapsuleColl(
+        cap = CapsuleColl(
             radii=jnp.array(radius),
             heights=jnp.array(height),
             tf=tf,
+        )
+
+        # Optimize the fit.
+        # cap = cap.optimize_fit(mesh)
+
+        return cap
+
+    def optimize_fit(self, mesh: trimesh.Trimesh) -> CapsuleColl:
+        """Optimize the capsule to fit the mesh better."""
+
+        # Create variables for the capsule geometry (radii and heights).
+        CapsuleVar = jaxls.Var[jax.Array]
+
+        vals = [CapsuleVar(id=0), jaxls.SE3Var(id=1)]
+
+        from jaxmp.collision_sdf import dist_signed  # circular import, so pylint: disable=import-outside-toplevel
+
+        def dist_point_cap(
+            _vals: jaxls.VarValues,
+            radii_and_height: jaxls.Var[jax.Array],
+            tf_var: jaxls.SE3Var,
+        ) -> Float[Array, "capsule vertex"]:
+            """Distance between a point and a capsule."""
+            cap = CapsuleColl(
+                radii=_vals[radii_and_height][..., 0],
+                heights=_vals[radii_and_height][..., 1],
+                tf=_vals[tf_var],
+            )
+
+            # Make sure that all points in the mesh are inside the capsule.
+            vertices = jnp.array(mesh.vertices)
+            dist = dist_signed(
+                cap,
+                SphereColl(centers=vertices, radii=jnp.zeros(vertices.shape[0]))
+            ).flatten()
+            sdf = jnp.minimum(0.0, dist)  # I.e., keep dist > 0.
+
+            return sdf
+
+        graph = jaxls.FactorGraph.make(
+            factors=[
+                jaxls.Factor.make(
+                    dist_point_cap,
+                    (vals[0], vals[1]),
+                ),
+                jaxls.Factor.make(
+                    lambda vals, var: jnp.maximum(0.0, -vals[var]).flatten() * 1000.0,
+                    (vals[0],),
+                ),  # Make sure height and radii are positive.
+            ],
+            variables=vals,
+        )
+        solution = graph.solve(
+            initial_vals=jaxls.VarValues.make(
+                vals,
+                [
+                    jnp.stack([self.radii, self.heights], axis=-1),
+                    self.tf,
+                ],
+            ),
+        )
+        return CapsuleColl(
+            radii=solution[vals[0]][..., 0],
+            heights=solution[vals[0]][..., 1],
+            tf=solution[vals[1]],
         )
 
     def to_trimesh(self) -> trimesh.Trimesh:

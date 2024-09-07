@@ -10,6 +10,7 @@ Includes:
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Callable
 
 import jax
 import jax_dataclasses as jdc
@@ -84,6 +85,9 @@ class JaxKinTree:
     joint_names: jdc.Static[tuple[str]]
     """Names of the joints, in shape `joints`."""
 
+    joint_vel_limit: Float[Array, "act_joints"]
+    """Joint limit velocities for each actuated joint."""
+
     @staticmethod
     def from_urdf(urdf: yourdfpy.URDF) -> JaxKinTree:
         """Build a differentiable robot model from a URDF."""
@@ -96,6 +100,7 @@ class JaxKinTree:
         limits_lower = list[float]()
         limits_upper = list[float]()
         joint_names = list[str]()
+        joint_vel_limits = list[float]()
 
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             # Get joint names.
@@ -115,6 +120,10 @@ class JaxKinTree:
                 limits_lower.append(lower)
                 limits_upper.append(upper)
 
+                # Get the joint velocities.
+                joint_vel_limit = JaxKinTree._get_joint_limit_vel(joint)
+                joint_vel_limits.append(joint_vel_limit)
+
             # Get the parent joint index and transform for each joint.
             parent_idx, T_parent_joint = JaxKinTree._get_T_parent_joint(urdf, joint, joint_idx)
             idx_parent_joint.append(parent_idx)
@@ -129,6 +138,7 @@ class JaxKinTree:
         limits_lower = jnp.array(limits_lower)
         limits_upper = jnp.array(limits_upper)
         joint_names = tuple[str](joint_names)
+        joint_vel_limits = jnp.array(joint_vel_limits)
 
         assert idx_actuated_joint.shape == (len(urdf.joint_map),)
         assert joint_twists.shape == (num_actuated_joints, 6)
@@ -138,6 +148,7 @@ class JaxKinTree:
         assert limits_lower.shape == (num_actuated_joints,)
         assert limits_upper.shape == (num_actuated_joints,)
         assert len(joint_names) == num_joints
+        assert joint_vel_limits.shape == (num_actuated_joints,)
 
         return JaxKinTree(
             num_joints=num_joints,
@@ -149,6 +160,7 @@ class JaxKinTree:
             limits_lower=limits_lower,
             limits_upper=limits_upper,
             joint_names=joint_names,
+            joint_vel_limit=joint_vel_limits,
         )
 
     @staticmethod
@@ -236,6 +248,14 @@ class JaxKinTree:
             raise ValueError("We currently assume there are joint limits!")
         return lower, upper
 
+    @staticmethod
+    def _get_joint_limit_vel(joint: yourdfpy.Joint) -> float:
+        """Get the joint velocity for an actuated joint."""
+        if joint.limit is not None and joint.limit.velocity is not None:
+            return joint.limit.velocity
+        logger.warning("Joint velocity not specified, defaulting to 1.0.")
+        return 1.0
+
     @jdc.jit
     def forward_kinematics(
         self,
@@ -285,16 +305,27 @@ class JaxKinTree:
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 7)
         return Ts_world_joint
 
-    def normalize_joints(
-        self, cfg: Float[Array, "*batch num_act_joints"]
-    ) -> Float[Array, "*batch num_act_joints"]:
-        """Map joint values to the range [-1, 1]."""
-        return cfg
-        # return 2 * (cfg - self.limits_lower) / (self.limits_upper - self.limits_lower) - 1
+    def get_retract_fn(
+        self,
+    ) -> Callable[
+        [Float[Array, "*batch num_act_joints"], Float[Array, "*batch num_act_joints"]],
+        Float[Array, "*batch num_act_joints"],
+    ]:
+        """Return a retract function for the robot configuration,
+        considering different joint units for revolute/prismatic joints."""
 
-    def unnormalize_joints(
-        self, norm_cfg: Float[Array, "*batch num_act_joints"]
-    ) -> Float[Array, "*batch num_act_joints"]:
-        """Map normalized joint values ([-1, 1]) back to the original joint values."""
-        return norm_cfg
-        # return 0.5 * (norm_cfg + 1) * (self.limits_upper - self.limits_lower) + self.limits_lower
+        @jdc.jit
+        def retract_fn(
+            cfg: Float[Array, "*batch num_act_joints"],
+            delta: Float[Array, "*batch num_act_joints"],
+        ) -> Float[Array, "*batch num_act_joints"]:
+            """Retract function for the robot."""
+            assert cfg.shape == delta.shape
+            assert cfg.shape[-1] == self.num_actuated_joints
+
+            # Apply units to delta, by normalizing w/ the joint velocity.
+            _delta = delta * self.joint_vel_limit * 0.01
+
+            return cfg + _delta
+
+        return retract_fn
