@@ -1,4 +1,4 @@
-""" 06_manipulability.py.
+""" 05_manipulability.py.
 Similar to 01_kinematics.py, but including manipulability as the cost function!
 
 Hard to verify if it works, but the cost does make the robot pose different.
@@ -24,7 +24,7 @@ from jaxmp.robot_factors import RobotFactors
 def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
-    rot_weight: float = 0.5,
+    rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     manipulability_weight: float = 0.01,
@@ -53,7 +53,7 @@ def main(
     )
 
     # Create factor graph.
-    class JointVar(jaxls.Var[jax.Array], default=rest_pose, tangent_dim=kin.num_actuated_joints, retract_fn=kin.get_retract_fn()): ...
+    JointVar = robot_factors.get_var_class(default_val=rest_pose)
 
     def solve_ik():
         joint_vars = [JointVar(id=0)]
@@ -134,7 +134,6 @@ def main(
 
     while True:
         solve_ik()
-        time.sleep(0.01)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ class RobotFactors:
         self,
         vals: jaxls.VarValues,
         var: jaxls.Var[Array],
+        eta: float,
         weights: Array,
     ) -> Array:
         """Collision-scaled dist for self-collision."""
@@ -92,13 +93,14 @@ class RobotFactors:
         sdf = dist_signed(coll, coll)
         weights = weights[:, None] * weights[None, :]
         assert sdf.shape == weights.shape
-        return (colldist_from_sdf(sdf) * weights).flatten()
+        return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     def world_coll_cost(
         self,
         vals: jaxls.VarValues,
         var: jaxls.Var[Array],
         other: CollBody,
+        eta: float,
         weights: Array,
     ) -> Array:
         """Collision-scaled dist for world collisio."""
@@ -107,7 +109,7 @@ class RobotFactors:
         coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(joint_cfg)))
         sdf = dist_signed(coll, other).flatten()
         assert sdf.shape == weights.shape
-        return colldist_from_sdf(sdf) * weights
+        return colldist_from_sdf(sdf, eta=eta) * weights
 
     def smoothness_cost(
         self,

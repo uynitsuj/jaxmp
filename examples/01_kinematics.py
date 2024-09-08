@@ -7,7 +7,6 @@ import tyro
 
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
-import jax
 import jax.numpy as jnp
 import jaxlie
 import numpy as onp
@@ -22,8 +21,8 @@ from jaxmp.robot_factors import RobotFactors
 def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
-    rot_weight: float = 0.5,
-    rest_weight: float = 0.1,
+    rot_weight: float = 1.0,
+    rest_weight: float = 0.01,
     limit_weight: float = 100.0,
 ):
     urdf = load_robot_description(robot_description)
@@ -39,6 +38,10 @@ def main(
     urdf_vis = viser.extras.ViserUrdf(server, urdf)
     target_tf_handle = server.scene.add_transform_controls("target transform", scale=0.2)
     target_frame_handle = server.scene.add_frame("target", axes_length=0.1)
+    server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
+
+    # Timing info.
+    timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
 
     # Show target joint name, and current joint positions.
     target_name_handle = server.gui.add_dropdown(
@@ -56,6 +59,7 @@ def main(
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
 
+        start_time = time.time()
         graph = jaxls.FactorGraph.make(
             [
                 jaxls.Factor.make(
@@ -90,6 +94,11 @@ def main(
             trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
         )
+
+        # Update timing info.
+        timing_handle.value = (time.time() - start_time) * 1000
+
+        # Update visualization.
         joints = solution[joint_vars[0]]
         urdf_vis.update_cfg(onp.array(joints))
         T_target_world = kin.forward_kinematics(joints)[target_joint_idx]
@@ -98,7 +107,6 @@ def main(
 
     while True:
         solve_ik()
-        time.sleep(0.01)
 
 
 if __name__ == "__main__":

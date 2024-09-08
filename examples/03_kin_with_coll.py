@@ -25,11 +25,11 @@ from jaxmp.robot_factors import RobotFactors
 def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
-    rot_weight: float = 0.5,
+    rot_weight: float = 1.0,
+    rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    rest_weight: float = 0.1,
     coll_weight: float = 2.0,
-    world_coll_weight: float = 10.0,
+    world_coll_weight: float = 100.0,
 ):
     urdf = load_robot_description(robot_description)
     urdf = sort_joint_map(urdf)
@@ -63,8 +63,12 @@ def main(
     # Create ground plane as an obstacle (world collision)!
     obstacle = HalfSpaceColl(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, 1.0]))
     server.scene.add_mesh_trimesh("ground_plane", obstacle.to_trimesh())
+    server.scene.add_grid("ground", width=3, height=3, cell_size=0.1, position=(0.0, 0.0, 0.001))
     self_coll_value = server.gui.add_number("max. coll dist (self)", 0.0, step=0.01, disabled=True)
     world_coll_value = server.gui.add_number("max. coll dist (world)", 0.0, step=0.01, disabled=True)
+
+    # Timing info.
+    timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
 
     # Create factor graph.
     JointVar = robot_factors.get_var_class(default_val=rest_pose)
@@ -77,6 +81,7 @@ def main(
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
 
+        start = time.time()
         graph = jaxls.FactorGraph.make(
             [
                 jaxls.Factor.make(
@@ -97,13 +102,14 @@ def main(
                 ),
                 jaxls.Factor.make(
                     robot_factors.self_coll_cost,
-                    (joint_vars[0], jnp.array([coll_weight] * len(robot_coll))),
+                    (joint_vars[0], 0.05, jnp.array([coll_weight] * len(robot_coll))),
                 ),
                 jaxls.Factor.make(
                     robot_factors.world_coll_cost,
                     (
                         joint_vars[0],
                         obstacle,
+                        0.01,
                         jnp.array([world_coll_weight] * len(robot_coll)),
                     ),
                 ),
@@ -124,6 +130,10 @@ def main(
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             verbose=False,
         )
+
+        # Update timing info.
+        timing_handle.value = (time.time() - start) * 1000
+
         joints = solution[joint_vars[0]]
         T_target_world = jaxlie.SE3(  # pylint: disable=invalid-name
             kin.forward_kinematics(joints)[target_joint_idx]

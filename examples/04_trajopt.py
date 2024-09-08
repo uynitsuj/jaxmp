@@ -2,10 +2,12 @@
 Given some SE3 trajectory in joint frame, optimize the robot joint trajectory for path smoothness.
 """
 
+import time
 from pathlib import Path
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
-import jax
+from loguru import logger
+
 import jax.numpy as jnp
 import jaxlie
 import numpy as onp
@@ -17,8 +19,9 @@ from jaxmp.robot_factors import RobotFactors
 
 def main(
     pos_weight: float = 5.0,
-    rot_weight: float = 0.5,
+    rot_weight: float = 1.0,
     limit_weight: float = 100.0,
+    rest_weight: float = 0.01,
     smoothness_weight: float = 1.0
 ):
     urdf = load_robot_description("yumi_description")
@@ -32,13 +35,7 @@ def main(
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     # Create factor graph.
-    class JointVar(
-        jaxls.Var[jax.Array],
-        default=rest_pose,
-        tangent_dim=kin.num_actuated_joints,
-        retract_fn=kin.get_retract_fn(),
-    ): ...
-
+    JointVar = robot_factors.get_var_class(default_val=rest_pose)
     traj_vars = [JointVar(id=i) for i in range(timesteps)]
 
     factors = []
@@ -55,7 +52,7 @@ def main(
                             idx,
                             jnp.array([pos_weight] * 3 + [rot_weight] * 3),
                         ),
-                    )
+                    ),
                 ]
             )
         factors.extend(
@@ -66,7 +63,14 @@ def main(
                         traj_vars[tstep],
                         jnp.array([limit_weight] * kin.num_actuated_joints),
                     ),
-                )
+                ),
+                jaxls.Factor.make(
+                    robot_factors.rest_cost,
+                    (
+                        traj_vars[tstep],
+                        jnp.array([rest_weight] * kin.num_actuated_joints),
+                    ),
+                ),
             ]
         )
         if tstep > 0:
@@ -81,6 +85,7 @@ def main(
                 )
             )
 
+    start = time.time()
     graph = jaxls.FactorGraph.make(
         factors,
         traj_vars,
@@ -91,13 +96,14 @@ def main(
         termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
     )
     traj = onp.array([solution[var] for var in traj_vars])
+    logger.info(f"Solved in {time.time() - start:.2f} seconds")
 
     import viser
     import viser.extras
-    import time
 
     server = viser.ViserServer()
     urdf_orig = viser.extras.ViserUrdf(server, urdf, root_node_name="/urdf")
+    server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
 
     # Visualize!
     slider = server.gui.add_slider(
