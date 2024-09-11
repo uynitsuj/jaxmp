@@ -8,6 +8,7 @@ import tyro
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import jaxlie
 import numpy as onp
 import jaxls
@@ -53,41 +54,41 @@ def main(
     # Create factor graph.
     JointVar = robot_factors.get_var_class(default_val=rest_pose)
 
-    def solve_ik():
+    @jdc.jit
+    def solve_ik(target_pose: jaxlie.SE3, target_joint_idx: jdc.Static[int]) -> jnp.ndarray:
         joint_vars = [JointVar(id=0)]
 
-        target_joint_idx = kin.joint_names.index(target_name_handle.value)
-        target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
-
         start_time = time.time()
+        factors = [
+            jaxls.Factor.make(
+                robot_factors.ik_cost,
+                (
+                    joint_vars[0],
+                    target_pose,
+                    target_joint_idx,
+                    jnp.array([pos_weight] * 3 + [rot_weight] * 3),
+                ),
+            ),
+            jaxls.Factor.make(
+                robot_factors.limit_cost,
+                (
+                    joint_vars[0],
+                    jnp.array([limit_weight] * kin.num_actuated_joints),
+                ),
+            ),
+            jaxls.Factor.make(
+                robot_factors.rest_cost,
+                (
+                    joint_vars[0],
+                    jnp.array([rest_weight] * kin.num_actuated_joints),
+                ),
+            ),
+        ]
         graph = jaxls.FactorGraph.make(
-            [
-                jaxls.Factor.make(
-                    robot_factors.ik_cost,
-                    (
-                        joint_vars[0],
-                        target_pose,
-                        target_joint_idx,
-                        jnp.array([pos_weight] * 3 + [rot_weight] * 3),
-                    ),
-                ),
-                jaxls.Factor.make(
-                    robot_factors.limit_cost,
-                    (
-                        joint_vars[0],
-                        jnp.array([limit_weight] * kin.num_actuated_joints),
-                    ),
-                ),
-                jaxls.Factor.make(
-                    robot_factors.rest_cost,
-                    (
-                        joint_vars[0],
-                        jnp.array([rest_weight] * kin.num_actuated_joints),
-                    ),
-                ),
-            ],
+            factors,
             joint_vars,
             verbose=False,
+            use_onp=False,
         )
         solution = graph.solve(
             initial_vals=jaxls.VarValues.make(joint_vars, [JointVar.default]),
@@ -100,13 +101,18 @@ def main(
 
         # Update visualization.
         joints = solution[joint_vars[0]]
+        return joints
+
+    while True:
+        target_joint_idx = kin.joint_names.index(target_name_handle.value)
+        target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
+
+        joints = solve_ik(target_pose, target_joint_idx)
+
         urdf_vis.update_cfg(onp.array(joints))
         T_target_world = kin.forward_kinematics(joints)[target_joint_idx]
         target_frame_handle.position = onp.array(T_target_world)[4:]
         target_frame_handle.wxyz = onp.array(T_target_world)[:4]
-
-    while True:
-        solve_ik()
 
 
 if __name__ == "__main__":

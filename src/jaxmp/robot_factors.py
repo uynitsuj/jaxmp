@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import jax
 from jax import Array
+import jax_dataclasses as jdc
 import jax.numpy as jnp
 import jaxlie
 
@@ -14,7 +15,7 @@ from jaxmp.kinematics import JaxKinTree
 from jaxmp.collision_sdf import colldist_from_sdf, dist_signed
 from jaxmp.collision_types import RobotColl, CollBody
 
-@dataclass
+@jdc.pytree_dataclass
 class RobotFactors:
     """Common costs."""
 
@@ -40,7 +41,7 @@ class RobotFactors:
         vals: jaxls.VarValues,
         var: jaxls.Var[Array],
         target_pose: jaxlie.SE3,
-        target_joint_idx: int,
+        target_joint_idx: jdc.Static[int],
         weights: Array,
     ) -> Array:
         """Pose cost."""
@@ -50,8 +51,9 @@ class RobotFactors:
             jaxlie.SE3(Ts_joint_world[target_joint_idx]).inverse()
             @ target_pose
         ).log()
+        weights = jnp.broadcast_to(weights, residual.shape)
         assert residual.shape == weights.shape
-        return residual * weights
+        return (residual * weights).flatten()
 
     def limit_cost(
         self,
@@ -65,6 +67,20 @@ class RobotFactors:
             jnp.maximum(0.0, joint_cfg - self.kin.limits_upper) +
             jnp.maximum(0.0, self.kin.limits_lower - joint_cfg)
         )
+        assert residual.shape == weights.shape
+        return residual * weights
+
+    def joint_limit_vel_cost(
+        self,
+        vals: jaxls.VarValues,
+        var_curr: jaxls.Var[Array],
+        var_prev: jaxls.Var[Array],
+        dt: float,
+        weights: Array,
+    ) -> Array:
+        """Joint limit velocity cost."""
+        joint_vel = (vals[var_curr] - vals[var_prev]) / dt
+        residual = jnp.maximum(0.0, jnp.abs(joint_vel) - self.kin.joint_vel_limit)
         assert residual.shape == weights.shape
         return residual * weights
 
@@ -107,9 +123,9 @@ class RobotFactors:
         assert self.coll is not None
         joint_cfg = vals[var]
         coll = self.coll.transform(jaxlie.SE3(self.kin.forward_kinematics(joint_cfg)))
-        sdf = dist_signed(coll, other).flatten()
-        assert sdf.shape == weights.shape
-        return colldist_from_sdf(sdf, eta=eta) * weights
+        sdf = dist_signed(other, coll)
+        weights = jnp.broadcast_to(weights, sdf.shape)
+        return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     def smoothness_cost(
         self,
