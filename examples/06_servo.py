@@ -44,6 +44,7 @@ def main(
 
     kin = JaxKinTree.from_urdf(urdf)
     coll = RobotColl.from_urdf(urdf)
+
     robot_factors = RobotFactors(kin, coll)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
@@ -104,7 +105,17 @@ def main(
                         [rest_weight] * kin.num_actuated_joints
                     ),
                 ),
-            )
+            ),
+            jaxls.Factor.make(
+                robot_factors.self_coll_cost,
+                (
+                    joint_vars[0],
+                    0.05,
+                    jnp.array(
+                        [self_collision_weight] * len(coll)
+                    ),
+                ),
+            ),
         ]
 
         # Create the factor graph
