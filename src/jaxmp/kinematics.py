@@ -53,11 +53,11 @@ def sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
     )
     return updated_urdf
 
-def freeze_joints(urdf: yourdfpy.URDF, joint_idx: list[int]) -> yourdfpy.URDF:
+def freeze_joints(urdf: yourdfpy.URDF, joint_names: list[str]) -> yourdfpy.URDF:
     """Freeze the joints in the URDF, by setting their limits to the current value."""
     joints = deepcopy(urdf.robot.joints)
-    for idx, joint in enumerate(joints):
-        if idx in joint_idx:
+    for joint in joints:
+        if joint.name in joint_names:
             joint.type = "fixed"
             joint.mimic = None # Can't mimic a fixed joint.
     robot = deepcopy(urdf.robot)

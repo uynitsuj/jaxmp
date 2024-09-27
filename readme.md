@@ -14,3 +14,7 @@ JIT compilation can take up to 10-15 seconds.
 - [ ] how to make sure that the ball is between the grippers?
 - [ ] maybe in the process make the costs easier to set?
 - [ ] singularities.
+
+Collisions get brittle when:
+- there's too many collisionbodies, and
+- the bodies themselves get really small.

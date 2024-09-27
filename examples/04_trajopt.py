@@ -5,6 +5,8 @@ Given some SE3 trajectory in joint frame, optimize the robot joint trajectory fo
 import time
 from pathlib import Path
 from robot_descriptions.loaders.yourdfpy import load_robot_description
+import viser
+import viser.extras
 
 from loguru import logger
 
@@ -31,11 +33,10 @@ def main(
         allow_pickle=True
     ).item()  # {'joint_name': [time, wxyz_xyz]}
     timesteps = list(trajectory.values())[0].shape[0]
-    robot_factors = RobotFactors(kin)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     # Create factor graph.
-    JointVar = robot_factors.get_var_class(default_val=rest_pose)
+    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
     traj_vars = [JointVar(id=i) for i in range(timesteps)]
 
     factors = []
@@ -45,8 +46,9 @@ def main(
             factors.extend(
                 [
                     jaxls.Factor.make(
-                        robot_factors.ik_cost,
+                        RobotFactors.ik_cost,
                         (
+                            kin,
                             traj_vars[tstep],
                             jaxlie.SE3(trajectory[joint_name][tstep]),
                             idx,
@@ -58,14 +60,15 @@ def main(
         factors.extend(
             [
                 jaxls.Factor.make(
-                    robot_factors.limit_cost,
+                    RobotFactors.limit_cost,
                     (
+                        kin,
                         traj_vars[tstep],
                         jnp.array([limit_weight] * kin.num_actuated_joints),
                     ),
                 ),
                 jaxls.Factor.make(
-                    robot_factors.rest_cost,
+                    RobotFactors.rest_cost,
                     (
                         traj_vars[tstep],
                         jnp.array([rest_weight] * kin.num_actuated_joints),
@@ -76,7 +79,7 @@ def main(
         if tstep > 0:
             factors.append(
                 jaxls.Factor.make(
-                    robot_factors.smoothness_cost,
+                    RobotFactors.smoothness_cost,
                     (
                         traj_vars[tstep],
                         traj_vars[tstep - 1],
@@ -91,15 +94,12 @@ def main(
         traj_vars,
     )
     solution = graph.solve(
-        initial_vals=jaxls.VarValues.make(traj_vars, [rest_pose] * timesteps),
+        initial_vals=jaxls.VarValues.make(traj_vars),
         trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
         termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
     )
     traj = onp.array([solution[var] for var in traj_vars])
-    logger.info(f"Solved in {time.time() - start:.2f} seconds")
-
-    import viser
-    import viser.extras
+    logger.info(f"Solved in {time.time() - start:.2f} seconds.")
 
     server = viser.ViserServer()
     urdf_orig = viser.extras.ViserUrdf(server, urdf, root_node_name="/urdf")

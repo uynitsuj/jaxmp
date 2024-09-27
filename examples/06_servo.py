@@ -6,6 +6,8 @@ but instead of reaching the position directly,
 the robot slowly moves to the target position.
 
 It should respect joint velocity limits and singularity avoidance.
+
+Currently buggy (some leak).
 """
 
 import time
@@ -37,6 +39,7 @@ def main(
     velocity_limit_weight: float = 10.0,
     start_pose_weight: float = 10.0,
     self_collision_weight: float = 1.0,
+    num_waypoints: int = 5,
     dt: float = 0.1,
 ):
     urdf = load_robot_description(robot_description)
@@ -44,8 +47,6 @@ def main(
 
     kin = JaxKinTree.from_urdf(urdf)
     coll = RobotColl.from_urdf(urdf)
-
-    robot_factors = RobotFactors(kin, coll)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     server = viser.ViserServer()
@@ -70,7 +71,7 @@ def main(
     )
 
     # Create factor graph.
-    JointVar = robot_factors.get_var_class(default_val=rest_pose)
+    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
 
     @jdc.jit
     def get_joints_for_pose(
@@ -80,8 +81,9 @@ def main(
         joint_vars = [JointVar(id=0)]
         factors = [
             jaxls.Factor.make(
-                robot_factors.ik_cost,
+                RobotFactors.ik_cost,
                 (
+                    kin,
                     joint_vars[0],  # Apply target pose to the last waypoint
                     target_pose,
                     target_joint_idx,
@@ -89,8 +91,9 @@ def main(
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.limit_cost,
+                RobotFactors.limit_cost,
                 (
+                    kin,
                     joint_vars[0],
                     jnp.array(
                         [limit_weight] * kin.num_actuated_joints
@@ -98,7 +101,7 @@ def main(
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.rest_cost,
+                RobotFactors.rest_cost,
                 (
                     joint_vars[0],
                     jnp.array(
@@ -107,8 +110,10 @@ def main(
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.self_coll_cost,
+                RobotFactors.self_coll_cost,
                 (
+                    kin,
+                    coll,
                     joint_vars[0],
                     0.05,
                     jnp.array(
@@ -122,13 +127,12 @@ def main(
         graph = jaxls.FactorGraph.make(
             factors,
             joint_vars,
-            verbose=False,
             use_onp=False,
         )
 
         # Solve the factor graph
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [JointVar.default]),
+            initial_vals=jaxls.VarValues.make(joint_vars),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
         )
@@ -138,10 +142,11 @@ def main(
     @jdc.jit
     def path_to_pose(
         start_joint_angles: jax.Array,
+        initial_vals: jax.Array,
         target_pose: jaxlie.SE3,
         target_joint_idx: jdc.Static[int],
         num_waypoints: jdc.Static[int],
-    ) -> list[jax.Array]:
+    ) -> jax.Array:
         """
         Generates a trajectory of poses from a start pose to a target pose.
         Args:
@@ -152,9 +157,6 @@ def main(
         Returns:
             list[jaxlie.SE3]: The trajectory of joint angles from start_pose to target_pose.
         """
-        # Calculate joint variable for the final waypoint
-        final_joints = get_joints_for_pose(target_pose, target_joint_idx)
-
         # Create joint variables for each waypoint
         joint_vars = [JointVar(id=i) for i in range(num_waypoints)]
 
@@ -170,8 +172,9 @@ def main(
                     (joint_vars[0],),
                 ),
                 jaxls.Factor.make(
-                    robot_factors.ik_cost,
+                    RobotFactors.ik_cost,
                     (
+                        kin,
                         joint_vars[-1],  # Apply target pose to the last waypoint
                         target_pose,
                         target_joint_idx,
@@ -184,8 +187,9 @@ def main(
         for i in range(num_waypoints):
             factors.extend([
                 jaxls.Factor.make(
-                    robot_factors.limit_cost,
+                    RobotFactors.limit_cost,
                     (
+                        kin,
                         joint_vars[i],
                         jnp.array(
                             [limit_weight / num_waypoints] * kin.num_actuated_joints
@@ -193,7 +197,7 @@ def main(
                     ),
                 ),
                 jaxls.Factor.make(
-                    robot_factors.rest_cost,
+                    RobotFactors.rest_cost,
                     (
                         joint_vars[i],
                         jnp.array(
@@ -202,8 +206,10 @@ def main(
                     ),
                 ),
                 jaxls.Factor.make(
-                    robot_factors.self_coll_cost,
+                    RobotFactors.self_coll_cost,
                     (
+                        kin,
+                        coll,
                         joint_vars[i],
                         0.05,
                         jnp.array(
@@ -217,7 +223,7 @@ def main(
         for i in range(num_waypoints - 1):
             factors.append(
                 jaxls.Factor.make(
-                    robot_factors.smoothness_cost,
+                    RobotFactors.smoothness_cost,
                     (
                         joint_vars[i],
                         joint_vars[i + 1],
@@ -230,8 +236,9 @@ def main(
             )
             factors.append(
                 jaxls.Factor.make(
-                    robot_factors.joint_limit_vel_cost,
+                    RobotFactors.joint_limit_vel_cost,
                     (
+                        kin,
                         joint_vars[i],
                         joint_vars[i + 1],
                         dt,
@@ -247,24 +254,18 @@ def main(
         graph = jaxls.FactorGraph.make(
             factors,
             joint_vars,
-            verbose=False,
             use_onp=False,
         )
 
-        # Initial vals using linear interpolation between start and final joint angles
-        initial_vals = [
-            start_joint_angles + (final_joints - start_joint_angles) * i / (num_waypoints - 1)
-            for i in range(num_waypoints)
-        ]
-
         # Solve the factor graph
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, initial_vals),
+            initial_vals=jaxls.VarValues.make([v.with_value(initial_vals[v.id]) for v in joint_vars]),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
+            verbose=False,
         )
 
-        traj = [solution[joint_var] for joint_var in joint_vars][1:]
+        traj = jnp.stack([solution[joint_var] for joint_var in joint_vars][1:])
         return traj
 
     current_joints = rest_pose
@@ -284,10 +285,25 @@ def main(
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
 
         # Generate a trajectory from the current joint angles to the target pose.
-        # with server.atomic():
         with jax_lock:
             start_time = time.time()
-            pose_queue = path_to_pose(current_joints, target_pose, target_joint_idx, 10)
+            # Calculate joint variable for the final waypoint
+            final_joints = get_joints_for_pose(target_pose, target_joint_idx)
+
+            initial_vals = jnp.stack([
+                current_joints + (final_joints - current_joints) * i / (num_waypoints - 1)
+                for i in range(num_waypoints)
+            ])
+
+            traj = path_to_pose(
+                current_joints,
+                initial_vals,
+                target_pose,
+                target_joint_idx,
+                num_waypoints,
+            )
+
+            pose_queue = [jnp.array(joints) for joints in traj]
             timing_handle.value = (time.time() - start_time) * 1000
 
         target_frame_handle.position = tuple(target_pose.translation())

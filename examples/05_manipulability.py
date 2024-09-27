@@ -32,7 +32,6 @@ def main(
     urdf = load_robot_description(robot_description)
     urdf = sort_joint_map(urdf)
     kin = JaxKinTree.from_urdf(urdf)
-    robot_factors = RobotFactors(kin)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     server = viser.ViserServer()
@@ -53,7 +52,7 @@ def main(
     )
 
     # Create factor graph.
-    JointVar = robot_factors.get_var_class(default_val=rest_pose)
+    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
 
     def solve_ik():
         joint_vars = [JointVar(id=0)]
@@ -62,8 +61,9 @@ def main(
         target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
         factors = [
             jaxls.Factor.make(
-                robot_factors.ik_cost,
+                RobotFactors.ik_cost,
                 (
+                    kin,
                     joint_vars[0],
                     target_pose,
                     target_joint_idx,
@@ -71,22 +71,24 @@ def main(
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.limit_cost,
+                RobotFactors.limit_cost,
                 (
+                    kin,
                     joint_vars[0],
                     jnp.array([limit_weight] * kin.num_actuated_joints),
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.rest_cost,
+                RobotFactors.rest_cost,
                 (
                     joint_vars[0],
                     jnp.array([rest_weight] * kin.num_actuated_joints),
                 ),
             ),
             jaxls.Factor.make(
-                robot_factors.manipulability_cost,
+                RobotFactors.manipulability_cost,
                 (
+                    kin,
                     joint_vars[0],
                     target_joint_idx,
                     jnp.array([manipulability_weight] * kin.num_actuated_joints),
@@ -98,10 +100,9 @@ def main(
         graph = jaxls.FactorGraph.make(
             factors,
             joint_vars,
-            verbose=False,
         )
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [rest_pose]),
+            initial_vals=jaxls.VarValues.make(joint_vars),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             verbose=False,
@@ -112,10 +113,9 @@ def main(
         graph = jaxls.FactorGraph.make(
             factors[:-1],
             joint_vars,
-            verbose=False,
         )
         solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars, [rest_pose]),
+            initial_vals=jaxls.VarValues.make(joint_vars),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
             verbose=False,
@@ -125,8 +125,8 @@ def main(
         urdf_vis.update_cfg(onp.array(joints))
         urdf_vis_no_manip.update_cfg(onp.array(joints_no_manip))
 
-        manip_norm_handle.value = robot_factors.manipulability(joints, target_joint_idx).item()
-        manip_norm_no_handle.value = robot_factors.manipulability(joints_no_manip, target_joint_idx).item()
+        manip_norm_handle.value = RobotFactors.manipulability(kin, joints, target_joint_idx).item()
+        manip_norm_no_handle.value = RobotFactors.manipulability(kin, joints_no_manip, target_joint_idx).item()
 
         T_target_world = jaxlie.SE3(kin.forward_kinematics(joints)[target_joint_idx]).wxyz_xyz
         target_frame_handle.position = onp.array(T_target_world)[4:]
