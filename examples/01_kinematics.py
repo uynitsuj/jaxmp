@@ -13,6 +13,8 @@ import viser.extras
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import jax
+# Set to cpu.
+jax.config.update("jax_platform_name", "cpu")
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import jaxlie
@@ -210,6 +212,7 @@ def main(
             f"target_{idx}",
             axes_length=0.5 * tf_size_handle.value,
             axes_radius=0.05 * tf_size_handle.value,
+            origin_radius=0.1 * tf_size_handle.value,
         )
         target_name_handles.append(target_name_handle)
         target_tf_handles.append(target_tf_handle)
@@ -223,6 +226,7 @@ def main(
         for target_frame_handle in target_frame_handles:
             target_frame_handle.axes_length = 0.5 * tf_size_handle.value
             target_frame_handle.axes_radius = 0.05 * tf_size_handle.value
+            target_frame_handle.origin_radius = 0.1 * tf_size_handle.value
 
     # Set target frames to where it is on the currently displayed robot.
     # We need to put them in world frame (since our goal is to match joint-to-world).
