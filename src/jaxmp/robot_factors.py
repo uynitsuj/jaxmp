@@ -16,7 +16,7 @@ from jaxmp.collision_sdf import colldist_from_sdf, dist_signed
 from jaxmp.collision_types import RobotColl, CollBody
 
 class RobotFactors:
-    """Common costs."""
+    """Helper class for using `jaxls` factors with a `JaxKinTree` and `RobotColl`."""
 
     @staticmethod
     def get_var_class(
