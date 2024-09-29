@@ -2,12 +2,9 @@
 06_servo.py
 
 Tests robot servoing using jaxmp; similar to 01_kinematics.py,
-but instead of reaching the position directly,
-the robot slowly moves to the target position.
+but instead of reaching the position directly, the robot solves for the velocity instead.
 
 It should respect joint velocity limits and singularity avoidance.
-
-Currently buggy (some leak).
 """
 
 import time
@@ -27,26 +24,136 @@ import viser.extras
 
 from jaxmp.kinematics import JaxKinTree, sort_joint_map
 from jaxmp.robot_factors import RobotFactors
-from jaxmp.collision_types import RobotColl
+
+
+def pos_limit_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], curr_joints: jnp.ndarray, kin: JaxKinTree, limit_weight: float, dt: float) -> jnp.ndarray:
+    joint_vel = vals[var]
+    joint_pos = curr_joints + joint_vel * dt
+    residual = (
+        jnp.maximum(0.0, joint_pos - kin.limits_upper) +
+        jnp.maximum(0.0, kin.limits_lower - joint_pos)
+    )
+    return (residual * jnp.array([limit_weight] * kin.num_actuated_joints)).flatten()
+
+def vel_limit_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], kin: JaxKinTree, vel_limit_weight: float) -> jnp.ndarray:
+    joint_vel = vals[var]
+    residual = jnp.maximum(jnp.abs(joint_vel) - kin.joint_vel_limit, 0.0)
+    return (residual * jnp.array([vel_limit_weight] * kin.num_actuated_joints)).flatten()
+
+def rest_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], curr_joints: jnp.ndarray, kin: JaxKinTree, rest_weight: float, dt: float) -> jnp.ndarray:
+    joint_vel = vals[var]
+    joint_pos = curr_joints + joint_vel * dt
+    return (joint_pos * jnp.array([rest_weight] * kin.num_actuated_joints)).flatten()
+
+def ik_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], pose: jaxlie.SE3, target_idx: int, curr_joints: jnp.ndarray, kin: JaxKinTree, gain: float, dt: float, pos_weight: float, rot_weight: float) -> jnp.ndarray:
+    """
+    PBS is formulated as:
+    v = beta * (T_target^-1 * T_current).log()
+    """
+    joint_vel = vals[var]
+    Ts_joint_world = kin.forward_kinematics(curr_joints + joint_vel * dt)
+    residual = (
+        (jaxlie.SE3(Ts_joint_world[target_idx])).inverse()
+        @ (pose)
+    ).log()
+    return (residual * gain * jnp.array([pos_weight] * 3 + [rot_weight] * 3)).flatten()
+
+def manip_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], curr_joints: jnp.ndarray, kin: JaxKinTree, target_idx: int, dt: float, manip_weight: float) -> jnp.ndarray:
+    joint_vel = vals[var]
+    curr_joints = curr_joints + joint_vel * dt
+    J = jax.jacfwd(lambda joints: kin.forward_kinematics(joints)[target_idx, 4:])(curr_joints)
+    eigval, _ = jnp.linalg.eigh(J @ J.T)
+    # want to maximize these!
+    return manip_weight * jnp.minimum(10.0-eigval, 10.0).flatten()
+
+@jdc.jit
+def solve_ik(
+    kin: JaxKinTree,
+    curr_joints: jnp.ndarray,
+    target_pose: jaxlie.SE3,
+    target_joint_idx: jdc.Static[int],
+    pos_weight: float,
+    rot_weight: float,
+    rest_weight: float,
+    limit_weight: float,
+    vel_limit_weight: float,
+    manip_weight: float,
+    gain: float,
+    dt: float,
+) -> jnp.ndarray:
+    """
+    Solve for the _joint velocity_ that moves the robot from the current pose to the target pose.
+    """
+    JointVelVar = RobotFactors.get_var_class(kin, default_val=jnp.zeros_like(curr_joints))
+
+    # What's the best way to fix up robotfactor?
+    joint_vars = [JointVelVar(0)]
+
+    factors: list[jaxls.Factor] = [
+        jaxls.Factor.make(pos_limit_cost, (JointVelVar(0), curr_joints, kin, limit_weight, dt)),
+        jaxls.Factor.make(vel_limit_cost, (JointVelVar(0), kin, vel_limit_weight)),
+        jaxls.Factor.make(rest_cost, (JointVelVar(0), curr_joints, kin, rest_weight, dt)),
+    ]
+
+    factors.extend([
+        jaxls.Factor.make(
+            ik_cost,
+            (
+                JointVelVar(0),
+                jaxlie.SE3(target_pose.wxyz_xyz),
+                target_joint_idx,
+                curr_joints,
+                kin,
+                gain,
+                dt,
+                pos_weight,
+                rot_weight
+            ),
+        ),
+        jaxls.Factor.make(
+            manip_cost,
+            (
+                JointVelVar(0),
+                curr_joints,
+                kin,
+                target_joint_idx,
+                dt,
+                manip_weight,
+            ),
+        )
+    ])
+
+    graph = jaxls.FactorGraph.make(
+        factors,
+        joint_vars,
+        use_onp=False,
+    )
+    solution = graph.solve(
+        initial_vals=jaxls.VarValues.make(joint_vars),
+        trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
+        termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
+        # verbose=False,
+    )
+
+    # Update visualization.
+    joint_vel = solution[JointVelVar(0)]
+    return joint_vel
 
 def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
-    rot_weight: float = 1.0,
-    rest_weight: float = 0.01,
+    rot_weight: float = 2.0,
+    rest_weight: float = 0.001,
     limit_weight: float = 100.0,
-    smoothness_weight: float = 1.0,
-    velocity_limit_weight: float = 10.0,
-    start_pose_weight: float = 10.0,
-    self_collision_weight: float = 1.0,
-    num_waypoints: int = 5,
-    dt: float = 0.1,
+    velocity_limit_weight: float = 100.0,
+    manip_weight: float = 0.001,
+    gain: float = 1,
+    dt: float = 0.2,
 ):
     urdf = load_robot_description(robot_description)
     urdf = sort_joint_map(urdf)
 
     kin = JaxKinTree.from_urdf(urdf)
-    coll = RobotColl.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
     server = viser.ViserServer()
@@ -55,10 +162,7 @@ def main(
     urdf_vis = viser.extras.ViserUrdf(server, urdf)
     target_tf_handle = server.scene.add_transform_controls("target transform", scale=0.2)
     target_frame_handle = server.scene.add_frame("target", axes_length=0.1)
-    current_frame_handle = server.scene.add_frame("current", axes_length=0.1)
     server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
-
-    update_pose_queue_handle = server.gui.add_button("Update pose queue")
 
     # Timing info.
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
@@ -69,260 +173,39 @@ def main(
         list(urdf.joint_names),
         initial_value=urdf.joint_names[0]
     )
-
-    # Create factor graph.
-    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
-
-    @jdc.jit
-    def get_joints_for_pose(
-        target_pose: jaxlie.SE3,
-        target_joint_idx: jdc.Static[int],
-    ) -> jax.Array:
-        joint_vars = [JointVar(id=0)]
-        factors = [
-            jaxls.Factor.make(
-                RobotFactors.ik_cost,
-                (
-                    kin,
-                    joint_vars[0],  # Apply target pose to the last waypoint
-                    target_pose,
-                    target_joint_idx,
-                    jnp.array([pos_weight] * 3 + [rot_weight] * 3),
-                ),
-            ),
-            jaxls.Factor.make(
-                RobotFactors.limit_cost,
-                (
-                    kin,
-                    joint_vars[0],
-                    jnp.array(
-                        [limit_weight] * kin.num_actuated_joints
-                    ),
-                ),
-            ),
-            jaxls.Factor.make(
-                RobotFactors.rest_cost,
-                (
-                    joint_vars[0],
-                    jnp.array(
-                        [rest_weight] * kin.num_actuated_joints
-                    ),
-                ),
-            ),
-            jaxls.Factor.make(
-                RobotFactors.self_coll_cost,
-                (
-                    kin,
-                    coll,
-                    joint_vars[0],
-                    0.05,
-                    jnp.array(
-                        [self_collision_weight] * len(coll)
-                    ),
-                ),
-            ),
-        ]
-
-        # Create the factor graph
-        graph = jaxls.FactorGraph.make(
-            factors,
-            joint_vars,
-            use_onp=False,
-        )
-
-        # Solve the factor graph
-        solution = graph.solve(
-            initial_vals=jaxls.VarValues.make(joint_vars),
-            trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
-            termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
-        )
-
-        return solution[joint_vars[0]]
-
-    @jdc.jit
-    def path_to_pose(
-        start_joint_angles: jax.Array,
-        initial_vals: jax.Array,
-        target_pose: jaxlie.SE3,
-        target_joint_idx: jdc.Static[int],
-        num_waypoints: jdc.Static[int],
-    ) -> jax.Array:
-        """
-        Generates a trajectory of poses from a start pose to a target pose.
-        Args:
-            start_joint_angles (jnp.ndarray): The starting joint angles.
-            target_pose (jaxlie.SE3): The target pose.
-            target_joint_idx (int): The index of the target joint.
-            num_waypoints (int): The number of waypoints in the trajectory.
-        Returns:
-            list[jaxlie.SE3]: The trajectory of joint angles from start_pose to target_pose.
-        """
-        # Create joint variables for each waypoint
-        joint_vars = [JointVar(id=i) for i in range(num_waypoints)]
-
-        # Create factors for each waypoint
-        factors = []
-
-        # Add factors for the initial and final waypoints
-        factors.extend(
-            [
-                jaxls.Factor.make(
-                    lambda vals, val: start_pose_weight
-                    * jnp.abs(vals[val] - start_joint_angles),
-                    (joint_vars[0],),
-                ),
-                jaxls.Factor.make(
-                    RobotFactors.ik_cost,
-                    (
-                        kin,
-                        joint_vars[-1],  # Apply target pose to the last waypoint
-                        target_pose,
-                        target_joint_idx,
-                        jnp.array([pos_weight] * 3 + [rot_weight] * 3),
-                    ),
-                ),
-            ]
-        )
-
-        for i in range(num_waypoints):
-            factors.extend([
-                jaxls.Factor.make(
-                    RobotFactors.limit_cost,
-                    (
-                        kin,
-                        joint_vars[i],
-                        jnp.array(
-                            [limit_weight / num_waypoints] * kin.num_actuated_joints
-                        ),
-                    ),
-                ),
-                jaxls.Factor.make(
-                    RobotFactors.rest_cost,
-                    (
-                        joint_vars[i],
-                        jnp.array(
-                            [rest_weight / num_waypoints] * kin.num_actuated_joints
-                        ),
-                    ),
-                ),
-                jaxls.Factor.make(
-                    RobotFactors.self_coll_cost,
-                    (
-                        kin,
-                        coll,
-                        joint_vars[i],
-                        0.05,
-                        jnp.array(
-                            [self_collision_weight / num_waypoints] * len(coll)
-                        ),
-                    ),
-                ),
-            ])
-
-        # Add smoothness and joint velocity limit factors between consecutive waypoints
-        for i in range(num_waypoints - 1):
-            factors.append(
-                jaxls.Factor.make(
-                    RobotFactors.smoothness_cost,
-                    (
-                        joint_vars[i],
-                        joint_vars[i + 1],
-                        jnp.array(
-                            [smoothness_weight / num_waypoints]
-                            * kin.num_actuated_joints
-                        ),
-                    ),
-                )
-            )
-            factors.append(
-                jaxls.Factor.make(
-                    RobotFactors.joint_limit_vel_cost,
-                    (
-                        kin,
-                        joint_vars[i],
-                        joint_vars[i + 1],
-                        dt,
-                        jnp.array(
-                            [velocity_limit_weight / num_waypoints]
-                            * kin.num_actuated_joints
-                        ),
-                    ),
-                )
-            )
-
-        # Create the factor graph
-        graph = jaxls.FactorGraph.make(
-            factors,
-            joint_vars,
-            use_onp=False,
-        )
-
-        # Solve the factor graph
-        solution = graph.solve(
-            initial_vals=jaxls.VarValues.make([v.with_value(initial_vals[v.id]) for v in joint_vars]),
-            trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
-            termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
-            verbose=False,
-        )
-
-        traj = jnp.stack([solution[joint_var] for joint_var in joint_vars][1:])
-        return traj
-
     current_joints = rest_pose
     urdf_vis.update_cfg(onp.array(current_joints))
 
-    pose_queue = []
-
-    from threading import Lock
-    jax_lock = Lock()
-
-    @target_tf_handle.on_update
-    def _(_):
-        nonlocal current_joints, pose_queue
-        update_pose_queue_handle.disabled = True
-
-        target_pose = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
+    while True:
+        target_pose = jaxlie.SE3(
+            jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position])
+        )
         target_joint_idx = kin.joint_names.index(target_name_handle.value)
 
         # Generate a trajectory from the current joint angles to the target pose.
-        with jax_lock:
-            start_time = time.time()
-            # Calculate joint variable for the final waypoint
-            final_joints = get_joints_for_pose(target_pose, target_joint_idx)
-
-            initial_vals = jnp.stack([
-                current_joints + (final_joints - current_joints) * i / (num_waypoints - 1)
-                for i in range(num_waypoints)
-            ])
-
-            traj = path_to_pose(
-                current_joints,
-                initial_vals,
-                target_pose,
-                target_joint_idx,
-                num_waypoints,
-            )
-
-            pose_queue = [jnp.array(joints) for joints in traj]
-            timing_handle.value = (time.time() - start_time) * 1000
+        start_time = time.time()
+        joint_vel = solve_ik(
+            kin,
+            current_joints,
+            target_pose,
+            target_joint_idx,
+            pos_weight,
+            rot_weight,
+            rest_weight,
+            limit_weight,
+            velocity_limit_weight,
+            manip_weight,
+            gain,
+            dt,
+        )
+        end_time = time.time()
+        timing_handle.value = (end_time - start_time) * 1000
+        
+        current_joints = current_joints + joint_vel * dt
+        urdf_vis.update_cfg(onp.array(current_joints))
 
         target_frame_handle.position = tuple(target_pose.translation())
         target_frame_handle.wxyz = tuple(target_pose.rotation().wxyz)
-
-        update_pose_queue_handle.disabled = False
-
-    while True:
-        if pose_queue:
-            current_joints = pose_queue.pop(0)
-
-            target_joint_idx = kin.joint_names.index(target_name_handle.value)
-            curr_pose = jaxlie.SE3(kin.forward_kinematics(current_joints)[target_joint_idx])
-            current_frame_handle.position = tuple(curr_pose.translation())
-            current_frame_handle.wxyz = tuple(curr_pose.rotation().wxyz)
-
-            urdf_vis.update_cfg(onp.array(current_joints))
-
-        time.sleep(0.1)
 
 if __name__ == "__main__":
     tyro.cli(main)
