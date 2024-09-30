@@ -64,7 +64,7 @@ def manip_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], curr_joints: 
     J = jax.jacfwd(lambda joints: kin.forward_kinematics(joints)[target_idx, 4:])(curr_joints)
     eigval, _ = jnp.linalg.eigh(J @ J.T)
     # want to maximize these!
-    return manip_weight * jnp.minimum(10.0-eigval, 10.0).flatten()
+    return manip_weight * jnp.minimum(1.0-eigval, 1.0).flatten()
 
 @jdc.jit
 def solve_ik(
@@ -143,10 +143,10 @@ def main(
     robot_description: str = "yumi_description",
     pos_weight: float = 5.0,
     rot_weight: float = 2.0,
-    rest_weight: float = 0.001,
+    rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     velocity_limit_weight: float = 100.0,
-    manip_weight: float = 0.001,
+    manip_weight: float = 0.01,
     gain: float = 1,
     dt: float = 0.2,
 ):
@@ -166,6 +166,22 @@ def main(
 
     # Timing info.
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
+
+    # Show joint names + limits.
+    slider_handles = {}
+    with server.gui.add_folder("Joint position control"):
+        for joint_name in urdf.joint_names:
+            lower = kin.limits_lower[kin.joint_names.index(joint_name)].item()
+            upper = kin.limits_upper[kin.joint_names.index(joint_name)].item()
+            slider = server.gui.add_slider(
+                label=joint_name,
+                min=lower,
+                max=upper,
+                step=1e-3,
+                initial_value=(lower + upper) / 2.0,
+                disabled=True,
+            )
+            slider_handles[joint_name] = slider
 
     # Show target joint name, and current joint positions.
     target_name_handle = server.gui.add_dropdown(
@@ -203,6 +219,8 @@ def main(
         
         current_joints = current_joints + joint_vel * dt
         urdf_vis.update_cfg(onp.array(current_joints))
+        for joint_name, slider in slider_handles.items():
+            slider.value = onp.array(current_joints[kin.joint_names.index(joint_name)]).item()
 
         target_frame_handle.position = tuple(target_pose.translation())
         target_frame_handle.wxyz = tuple(target_pose.rotation().wxyz)
