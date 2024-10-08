@@ -23,7 +23,7 @@ import viser
 import viser.extras
 
 from jaxmp.kinematics import JaxKinTree, sort_joint_map
-from jaxmp.robot_factors import RobotFactors
+from jaxmp.jaxls.robot_factors import RobotFactors
 
 
 def pos_limit_cost(vals: jaxls.VarValues, var: jaxls.Var[jnp.ndarray], curr_joints: jnp.ndarray, kin: JaxKinTree, limit_weight: float, dt: float) -> jnp.ndarray:

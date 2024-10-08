@@ -9,7 +9,7 @@ from jax import Array
 from jaxtyping import Float
 import jax.numpy as jnp
 
-from jaxmp.collision_types import (
+from jaxmp.coll.collision_types import (
     CollBody,
     SphereColl,
     CapsuleColl,

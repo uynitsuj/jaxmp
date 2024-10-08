@@ -17,7 +17,7 @@ import numpy as onp
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.robot_factors import RobotFactors
+from jaxmp.jaxls.robot_factors import RobotFactors
 
 def main(
     pos_weight: float = 5.0,

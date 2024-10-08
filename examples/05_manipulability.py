@@ -19,7 +19,7 @@ import viser
 import viser.extras
 
 from jaxmp.kinematics import JaxKinTree, sort_joint_map
-from jaxmp.robot_factors import RobotFactors
+from jaxmp.jaxls.robot_factors import RobotFactors
 
 def main(
     robot_description: str = "yumi_description",

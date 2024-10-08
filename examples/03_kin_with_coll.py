@@ -21,10 +21,11 @@ import jaxls
 import viser
 import viser.extras
 
-from jaxmp.collision_sdf import dist_signed
-from jaxmp.collision_types import HalfSpaceColl, RobotColl
-from jaxmp.kinematics import JaxKinTree, sort_joint_map
-from jaxmp.robot_factors import RobotFactors
+from jaxmp.coll.collision_sdf import dist_signed
+from jaxmp.coll.collision_types import HalfSpaceColl, RobotColl
+from jaxmp.kinematics import JaxKinTree
+from jaxmp.jaxls.robot_factors import RobotFactors
+from jaxmp.extras.urdf_loader import load_urdf
 
 def main(
     robot_description: str = "yumi_description",
@@ -36,15 +37,7 @@ def main(
     world_coll_weight: float = 100.0,
     robot_urdf_path: Optional[Path] = None,
 ):
-    if robot_urdf_path is not None:
-        def filename_handler(fname: str) -> str:
-            base_path = robot_urdf_path.parent
-            return yourdfpy.filename_handler_magic(fname, dir=base_path)
-        urdf = yourdfpy.URDF.load(robot_urdf_path, filename_handler=filename_handler)
-    else:
-        urdf = load_robot_description(robot_description)
-    urdf = sort_joint_map(urdf)
-
+    urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf)
     kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2

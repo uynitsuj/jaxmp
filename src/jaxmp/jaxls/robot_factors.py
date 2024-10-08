@@ -1,7 +1,6 @@
 """Common `jaxls` factors for robot control, via wrapping `JaxKinTree` and `RobotColl`.
 """
 from typing import Optional
-from dataclasses import dataclass
 
 import jax
 from jax import Array
@@ -12,8 +11,8 @@ import jaxlie
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.collision_sdf import colldist_from_sdf, dist_signed
-from jaxmp.collision_types import RobotColl, CollBody
+from jaxmp.coll.collision_sdf import colldist_from_sdf, dist_signed
+from jaxmp.coll.collision_types import RobotColl, CollBody
 
 class RobotFactors:
     """Helper class for using `jaxls` factors with a `JaxKinTree` and `RobotColl`."""
@@ -28,7 +27,7 @@ class RobotFactors:
 
         class JointVar(  # pylint: disable=missing-class-docstring
             jaxls.Var[Array],
-            default=default_val,
+            default_factory=lambda: default_val,
             tangent_dim=kin.num_actuated_joints,
             retract_fn=kin.get_retract_fn(),
         ): ...
@@ -73,6 +72,7 @@ class RobotFactors:
         assert residual.shape == weights.shape
         return residual * weights
 
+    @staticmethod
     def joint_limit_vel_cost(
         vals: jaxls.VarValues,
         kin: JaxKinTree,
@@ -94,9 +94,10 @@ class RobotFactors:
         weights: Array,
     ) -> Array:
         """Bias towards joints at rest pose, specified by `default`."""
-        assert var.default is not None
-        assert var.default.shape == vals[var].shape and var.default.shape == weights.shape
-        return (vals[var] - var.default) * weights
+        default = var.default_factory()
+        assert default is not None
+        assert default.shape == vals[var].shape and default.shape == weights.shape
+        return (vals[var] - default) * weights
 
     @staticmethod
     def self_coll_cost(

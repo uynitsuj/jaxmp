@@ -10,8 +10,8 @@ import jaxlie
 
 import viser
 
-from jaxmp.collision_types import CollBody, PlaneColl, SphereColl, CapsuleColl, HalfSpaceColl
-from jaxmp.collision_sdf import dist_signed
+from jaxmp.coll.collision_types import CollBody, PlaneColl, SphereColl, CapsuleColl, HalfSpaceColl
+from jaxmp.coll.collision_sdf import dist_signed
 
 def main():
     server = viser.ViserServer()
