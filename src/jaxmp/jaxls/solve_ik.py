@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 import jax
 import jaxlie
 import jax_dataclasses as jdc
@@ -18,6 +18,9 @@ def solve_ik(
     rest_weight: float,
     limit_weight: float,
     rest_pose: jnp.ndarray,
+    solver_type: jdc.Static[
+        Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
+    ] = "conjugate_gradient",
     freeze_target_xyz_xyz: Optional[jnp.ndarray] = None,
     freeze_base_xyz_xyz: Optional[jnp.ndarray] = None,
 ) -> tuple[jaxlie.SE3, jnp.ndarray]:
@@ -94,6 +97,7 @@ def solve_ik(
         use_onp=False,
     )
     solution = graph.solve(
+        linear_solver=solver_type,
         initial_vals=jaxls.VarValues.make(joint_vars),
         trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
         termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),

@@ -2,7 +2,7 @@
 Tests robot forward + inverse kinematics using JaxMP.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 from pathlib import Path
 import time
 import tyro
@@ -18,15 +18,13 @@ from jaxmp.extras.urdf_loader import load_urdf
 from jaxmp.kinematics import JaxKinTree
 from jaxmp.jaxls.solve_ik import solve_ik
 
-# Set to cpu.
-jax.config.update("jax_platform_name", "cpu")
-
 
 def main(
     pos_weight: float = 5.0,
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
+    device: Literal["cpu", "gpu"] = "cpu",
     robot_description: Optional[str] = "yumi",
     robot_urdf_path: Optional[Path] = None,
 ):
@@ -37,9 +35,13 @@ def main(
         rot_weight: Weight for rotation error in IK.
         rest_weight: Weight for rest pose in IK.
         limit_weight: Weight for joint limits in IK.
+        device: Device to use.
         robot_description: Name of the robot description to load.
         robot_urdf_path: Path to the robot URDF file.
     """
+    # Set device.
+    jax.config.update("jax_platform_name", device)
+
     # Load robot description.
     urdf = load_urdf(robot_description, robot_urdf_path)
 
@@ -100,6 +102,10 @@ def main(
     tf_size_handle = server.gui.add_slider(
         "Gizmo size", min=0.01, max=0.4, step=0.01, initial_value=0.2
     )
+    solver_type_handle = server.gui.add_dropdown(
+        "Solver type", ["cholmod", "conjugate_gradient", "dense_cholesky"]
+    )
+
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
     add_joint_button = server.gui.add_button("Add joint!")
 
@@ -198,6 +204,7 @@ def main(
             rest_weight,
             limit_weight,
             rest_pose,
+            solver_type_handle.value,
             get_freeze_target_xyz_xyz(),
             get_freeze_base_xyz_xyz(),
         )

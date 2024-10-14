@@ -34,12 +34,12 @@ def load_urdf(
         raise ValueError(
             "Either robot_description or robot_urdf_path must be provided."
         )
-    urdf = _sort_joint_map(urdf)
+    urdf = sort_joint_map(urdf)
     return urdf
 
 
 # sorter for joint_map, when the ordering is not in topology order.
-def _sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
+def sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
     """Return a sorted robot, with the joint map in topological order."""
     joints = deepcopy(urdf.robot.joints)
 
