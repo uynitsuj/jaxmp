@@ -6,9 +6,6 @@ from typing import Optional
 from pathlib import Path
 import time
 from jaxmp.coll import collide
-import yourdfpy
-
-from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import tyro
 
@@ -33,7 +30,7 @@ def main(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    coll_weight: float = 1.0,
+    coll_weight: float = 0.5,
     world_coll_weight: float = 100.0,
     robot_urdf_path: Optional[Path] = None,
 ):
@@ -85,16 +82,24 @@ def main(
     # Create factor graph.
     JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
 
-    collbody_handle = None
-    # @jdc.jit
+    @jdc.jit
     def solve_ik(
         target_pose: jaxlie.SE3,
         target_joint_indices: jdc.Static[tuple[int]],
     ) -> jnp.ndarray:
         joint_vars = [JointVar(id=0)]
 
+        self_coll_weight_mat = jnp.full(
+            jnp.broadcast_shapes(robot_coll.get_batch_axes(), robot_coll.get_batch_axes()),
+            coll_weight
+        )
+        world_coll_weight_mat = jnp.full(
+            jnp.broadcast_shapes(robot_coll.get_batch_axes(), obstacle.get_batch_axes()),
+            world_coll_weight
+        )
+
         factors: list[jaxls.Factor] = [
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.limit_cost,
                 (
                     kin,
@@ -102,28 +107,28 @@ def main(
                     jnp.array([limit_weight] * kin.num_actuated_joints),
                 ),
             ),
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.self_coll_cost,
                 (
                     kin,
                     robot_coll,
                     joint_vars[0],
                     0.01,
-                    jnp.full(robot_coll.get_batch_axes(), coll_weight),
+                    self_coll_weight_mat,
                 ),
             ),
-            # jaxls.Factor.make(
-            #     RobotFactors.world_coll_cost,
-            #     (
-            #         kin,
-            #         robot_coll,
-            #         joint_vars[0],
-            #         obstacle,
-            #         0.05,
-            #         jnp.full(robot_coll.get_batch_axes(), world_coll_weight),
-            #     ),
-            # ),
-            jaxls.Factor.make(
+            jaxls.Factor(
+                RobotFactors.world_coll_cost,
+                (
+                    kin,
+                    robot_coll,
+                    joint_vars[0],
+                    obstacle,
+                    0.05,
+                    world_coll_weight_mat,
+                ),
+            ),
+            jaxls.Factor(
                 RobotFactors.rest_cost,
                 (
                     joint_vars[0],
@@ -133,7 +138,7 @@ def main(
         ]
         for idx, target_joint_idx in enumerate(target_joint_indices):
             factors.append(
-                jaxls.Factor.make(
+                jaxls.Factor(
                     RobotFactors.ik_cost,
                     (
                         kin,
@@ -155,12 +160,13 @@ def main(
             initial_vals=jaxls.VarValues.make(joint_vars),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
-            # verbose=False,
+            verbose=False,
         )
 
         joints = solution[joint_vars[0]]
         return joints
 
+    collbody_handle = None
     while True:
         if len(target_name_handles) == 0:
             time.sleep(0.1)
@@ -194,7 +200,7 @@ def main(
 
         coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :]))
         self_coll_value.value = (collide(coll, coll.reshape(-1, 1))[0].squeeze() * coll.self_coll_matrix).min().item()
-        # world_coll_value.value = collide(coll, obstacle)[0].min().item()
+        world_coll_value.value = collide(coll, obstacle.reshape(-1, 1))[0].squeeze().min().item()
         if visualize_spheres.value:
             collbody_handle = server.scene.add_mesh_trimesh(
                 "coll",

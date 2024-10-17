@@ -57,7 +57,7 @@ def solve_ik(
     joint_vars = [JointVar(0), ConstrainedSE3Var(0)]
 
     factors: list[jaxls.Factor] = [
-        jaxls.Factor.make(
+        jaxls.Factor(
             RobotFactors.limit_cost,
             (
                 kin,
@@ -65,7 +65,7 @@ def solve_ik(
                 jnp.array([limit_weight] * kin.num_actuated_joints),
             ),
         ),
-        jaxls.Factor.make(
+        jaxls.Factor(
             RobotFactors.rest_cost,
             (
                 JointVar(0),
@@ -78,7 +78,7 @@ def solve_ik(
     ik_weights = ik_weights * freeze_target_xyz_xyz
     for idx, target_joint_idx in enumerate(target_joint_indices):
         factors.append(
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.ik_cost,
                 (
                     kin,

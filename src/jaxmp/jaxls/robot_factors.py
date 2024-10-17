@@ -111,7 +111,7 @@ class RobotFactors:
         joint_cfg = vals[var]
         coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
         sdf, _, _ = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
-        weights = weights[..., :, None] * weights[..., None, :] * coll.self_coll_matrix
+        weights = weights * coll.self_coll_matrix
         sdf = sdf[..., 0]
         assert sdf.shape == weights.shape
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
@@ -130,7 +130,7 @@ class RobotFactors:
         joint_cfg = vals[var]
         coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
         sdf, _, _ = collide(other, coll)
-        weights = jnp.broadcast_to(weights, sdf.shape)
+        sdf = sdf[..., 0]
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     @staticmethod

@@ -15,7 +15,8 @@ import jaxlie
 from jaxtyping import Float
 import jax_dataclasses as jdc
 
-from mujoco.mjx._src.collision_types import GeomInfo
+from mujoco.mjx._src.types import ConvexMesh
+from mujoco.mjx._src.mesh import _merge_coplanar, _get_face_norm, _get_edge_normals
 import trimesh
 
 
@@ -23,7 +24,7 @@ import trimesh
 class CollGeom(abc.ABC):
     pos: Float[jax.Array, "*batch 3"]  # Translation.
     mat: Float[jax.Array, "*batch 3 3"]  # SO3.
-    size: Float[jax.Array, "*batch shape_dim"]  # Object shape (e.g., radii, height).
+    size: Float[jax.Array, "*batch 3"]  # Object shape (e.g., radii, height).
 
     def get_batch_axes(self):
         return self.pos.shape[:-1]
@@ -32,20 +33,16 @@ class CollGeom(abc.ABC):
         with jdc.copy_and_mutate(self, validate=False) as _self:
             _self.pos = jnp.broadcast_to(self.pos, shape + (3,))
             _self.mat = jnp.broadcast_to(self.mat, shape + (3, 3))
-            _self.size = jnp.broadcast_to(self.size, shape + (self.shape_dim,))
+            _self.size = jnp.broadcast_to(self.size, shape + (3,))
         return _self
 
     def reshape(self, *shape):
         with jdc.copy_and_mutate(self, validate=False) as _self:
             _self.pos = self.pos.reshape(shape + (3,))
             _self.mat = self.mat.reshape(shape + (3, 3))
-            _self.size = self.size.reshape(shape + (self.shape_dim,))
+            _self.size = self.size.reshape(shape + (3,))
         return _self
     
-    @property
-    def shape_dim(self):
-        return self.size.shape[-1]
-
     def transform(self, tf: jaxlie.SE3):
         with jdc.copy_and_mutate(self, validate=False) as _self:
             _self.mat = (tf.rotation() @ jaxlie.SO3.from_matrix(self.mat)).as_matrix()
@@ -63,12 +60,12 @@ class CollGeom(abc.ABC):
 
         return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
 
-    @staticmethod
     @abc.abstractmethod
     def _create_one_mesh(
+        self,
         pos: Float[jax.Array, "3"],
         mat: Float[jax.Array, "3 3"],
-        size: Float[jax.Array, "shape_dim"],
+        size: Float[jax.Array, "3"],
     ):
         raise NotImplementedError
 
@@ -120,10 +117,12 @@ class Sphere(CollGeom):
 
         # Uses sphere.size[0] as the radius.
         assert radius.shape == batch_axes + (1,)
-        return Sphere(pos=center, mat=mat, size=radius)
 
-    @staticmethod
-    def _create_one_mesh(pos: jax.Array, mat: jax.Array, size: jax.Array):
+        size = jnp.zeros(batch_axes + (2,))
+        size = jnp.concatenate([radius, size], axis=-1)
+        return Sphere(pos=center, mat=mat, size=size)
+
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         sphere = trimesh.creation.icosphere(radius=size[0].item())
         tf = onp.eye(4)
         tf[:3, 3] = pos
@@ -150,7 +149,7 @@ class Capsule(CollGeom):
         # `plane_capsule` uses offsets (in [segment, -segment]).
         segment = height / 2
 
-        shape = jnp.concatenate([radius, segment], axis=-1)
+        shape = jnp.concatenate([radius, segment, jnp.zeros_like(radius)], axis=-1)
         return Capsule(pos=center, mat=mat, size=shape)
 
     @staticmethod
@@ -179,8 +178,7 @@ class Capsule(CollGeom):
 
         return cap
 
-    @staticmethod
-    def _create_one_mesh(pos: jax.Array, mat: jax.Array, size: jax.Array):
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         capsule = trimesh.creation.capsule(
             radius=size[0].item(), height=size[1].item()
         )
@@ -204,7 +202,56 @@ class Ellipsoid(CollGeom):
         assert abc.shape == batch_axes + (3,)
         return Ellipsoid(pos=center, mat=mat, size=abc)
     
-    @staticmethod
-    def _create_one_mesh(pos: jax.Array, mat: jax.Array, size: jax.Array):
-        raise NotImplementedError
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
+        ellipsoid = trimesh.creation.icosphere(radius=size[0].item())
+        ellipsoid.apply_scale(size)
+        tf = onp.eye(4)
+        tf[:3, 3] = pos
+        ellipsoid.vertices = trimesh.transform_points(ellipsoid.vertices, tf)
+        return ellipsoid
     
+
+@jdc.pytree_dataclass
+class Convex(CollGeom):
+    mesh: jdc.Static[trimesh.Trimesh]
+
+    @staticmethod
+    def from_convex_mesh(mesh: trimesh.Trimesh, batch_axes: tuple[int, ...] = ()) -> Convex:
+        """
+        Create geometry from convex mesh.
+        """
+        # Check if the mesh is convex.
+        assert mesh.is_convex
+
+        tf = jaxlie.SE3.identity(batch_axes)
+
+        return Convex(
+            pos=tf.translation(),
+            mat=tf.rotation().as_matrix(),
+            size=jnp.full((*batch_axes, 3), 0),  # unused.
+            mesh=mesh,
+        )
+    
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
+        mesh = self.mesh.copy()
+        tf = onp.eye(4)
+        tf[:3, :3] = mat
+        tf[:3, 3] = pos
+        mesh.vertices = trimesh.transform_points(mesh.vertices, tf)
+        return mesh
+    
+    def get_mesh_mjx(self) -> ConvexMesh:
+        # Based on https://github.com/google-deepmind/mujoco/blob/43a7493d1739d5cb1618de6863f929d99c7a8822/mjx/mujoco/mjx/_src/mesh.py#L280.
+        vert = onp.array(self.mesh.vertices)
+        face = onp.array(self.mesh.faces)
+        face_normal = _get_face_norm(vert, face)
+        edge, edge_face_normal = _get_edge_normals(face, face_normal)
+        face = vert[face]  # materialize full nface x nvert matrix
+
+        return ConvexMesh(
+            vert=jnp.array(vert),
+            face=jnp.array(face),
+            face_normal=jnp.array(face_normal),
+            edge=jnp.array(edge),
+            edge_face_normal=jnp.array(edge_face_normal),
+        )

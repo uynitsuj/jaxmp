@@ -3,6 +3,7 @@ Tests the different collision bodies, as defined in `collbody.py`.
 """
 
 import time
+import trimesh
 
 import jax.numpy as jnp
 from jaxmp.extras.urdf_loader import load_urdf
@@ -13,7 +14,7 @@ import jaxlie
 import viser
 import viser.extras
 
-from jaxmp.coll import collide, Capsule, Sphere, Plane, RobotColl
+from jaxmp.coll import collide, Capsule, Sphere, Plane, RobotColl, Convex
 
 def main():
     server = viser.ViserServer()
@@ -40,6 +41,7 @@ def main():
         Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])),
         Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
         Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
+        # Convex.from_convex_mesh(trimesh.creation.box(extents=[0.1, 0.1, 0.1])),
     ]
     handle_list = [server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))]
 
