@@ -11,8 +11,7 @@ import jaxlie
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll.collision_sdf import colldist_from_sdf, dist_signed
-from jaxmp.coll.collision_types import RobotColl, CollBody
+from jaxmp.coll import RobotColl, CollGeom, collide, colldist_from_sdf
 
 class RobotFactors:
     """Helper class for using `jaxls` factors with a `JaxKinTree` and `RobotColl`."""
@@ -110,9 +109,10 @@ class RobotFactors:
     ) -> Array:
         """Collision-scaled dist for self-collision."""
         joint_cfg = vals[var]
-        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)))
-        sdf = dist_signed(coll, coll)
-        weights = weights[:, None] * weights[None, :]
+        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
+        sdf, _, _ = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
+        weights = weights[..., :, None] * weights[..., None, :] * coll.self_coll_matrix
+        sdf = sdf[..., 0]
         assert sdf.shape == weights.shape
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
@@ -122,14 +122,14 @@ class RobotFactors:
         kin: JaxKinTree,
         coll: RobotColl,
         var: jaxls.Var[Array],
-        other: CollBody,
+        other: CollGeom,
         eta: float,
         weights: Array,
     ) -> Array:
         """Collision-scaled dist for world collisio."""
         joint_cfg = vals[var]
-        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)))
-        sdf = dist_signed(other, coll)
+        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
+        sdf, _, _ = collide(other, coll)
         weights = jnp.broadcast_to(weights, sdf.shape)
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 

@@ -27,7 +27,7 @@ class AntipodalGrasps:
     @staticmethod
     def from_sample_mesh(
         mesh: trimesh.Trimesh,
-        max_samples=1000,
+        max_samples=100,
         max_width=float("inf"),
         max_angle_deviation=onp.pi / 4,
     ) -> AntipodalGrasps:

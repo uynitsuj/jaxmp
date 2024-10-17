@@ -97,9 +97,11 @@ def main(
 
     # Create a graspable object!
     workspace_obj = trimesh.creation.box(extents=[0.05]*3)
-    obj_grasps = AntipodalGrasps.from_sample_mesh(workspace_obj, max_samples=100)
+    obj_grasps = AntipodalGrasps.from_sample_mesh(workspace_obj, max_samples=20)
     server.scene.add_mesh_trimesh("target_transform/mesh", workspace_obj)
     grasp_handles = []
+    
+    # TODO(cmk) remove hardcoding for `along_axis` (panda grasp axis is along y.)
     for idx in range(len(obj_grasps)):
         grasp_handles.append(
             server.scene.add_mesh_trimesh(
@@ -137,6 +139,9 @@ def main(
         solve_ik_batch = jax.vmap(
             solve_ik, in_axes=(None, 0, None, None, None, None, None, None, None)
         )
+        
+        # TODO(cmk) consider collisions here!!
+        # TODO(cmk) how to bias towards gripper facing down? -- maybe collision will address this.
         base_pose, joints = solve_ik_batch(
             kin,
             T_grasp_world,
