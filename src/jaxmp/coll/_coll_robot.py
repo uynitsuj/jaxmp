@@ -163,21 +163,6 @@ class RobotColl(Capsule):
             coll_weights = coll_weights.at[idx].set(weight)
         return jnp.array(coll_weights)
 
-    # def transform(self, tf: jaxlie.SE3) -> RobotColl:
-    #     """Re-configure the robot using the robot joint, derived w/ forward kinematics."""
-    #     Ts_world_joint = tf.wxyz_xyz  # pylint: disable=invalid-name
-    #     _coll = self.transform(
-    #         jaxlie.SE3(Ts_world_joint[..., self._idx_parent_joint, :])
-    #     )
-    #     return RobotColl(
-    #         pos=_coll.pos,
-    #         mat=_coll.mat,
-    #         size=_coll.size,
-    #         coll_link_names=self.coll_link_names,
-    #         _idx_parent_joint=self._idx_parent_joint,
-    #         self_coll_matrix=self.self_coll_matrix,
-    #     )
-
     @staticmethod
     def create_self_coll_matrix(
         urdf: yourdfpy.URDF,

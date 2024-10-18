@@ -12,7 +12,7 @@ import jax.numpy as jnp
 def solve_ik(
     kin: JaxKinTree,
     target_pose: jaxlie.SE3,
-    target_joint_indices: jdc.Static[tuple[int]],
+    target_joint_indices: jax.Array,
     pos_weight: float,
     rot_weight: float,
     rest_weight: float,

@@ -16,7 +16,7 @@ from jaxtyping import Float
 import jax_dataclasses as jdc
 
 from mujoco.mjx._src.types import ConvexMesh
-from mujoco.mjx._src.mesh import _merge_coplanar, _get_face_norm, _get_edge_normals
+from mujoco.mjx._src.mesh import _get_face_norm, _get_edge_normals
 import trimesh
 
 
@@ -214,6 +214,7 @@ class Ellipsoid(CollGeom):
 @jdc.pytree_dataclass
 class Convex(CollGeom):
     mesh: jdc.Static[trimesh.Trimesh]
+    # MJX batching works across pose, but one unique mesh at a time.
 
     @staticmethod
     def from_convex_mesh(mesh: trimesh.Trimesh, batch_axes: tuple[int, ...] = ()) -> Convex:
@@ -255,3 +256,59 @@ class Convex(CollGeom):
             edge=jnp.array(edge),
             edge_face_normal=jnp.array(edge_face_normal),
         )
+    
+@jdc.pytree_dataclass
+class Cylinder(CollGeom):
+    @staticmethod
+    def from_radius_and_height(
+        radius: jax.Array, height: jax.Array, transform: jaxlie.SE3
+    ) -> Cylinder:
+        batch_axes = transform.get_batch_axes()
+        center = transform.translation()
+        mat = transform.rotation().as_matrix()
+
+        mat = jaxlie.SO3.identity(batch_axes).as_matrix()
+
+        # Uses cylinder.size[0] as the radius and cylinder.size[1] as the height.
+        assert radius.shape == batch_axes + (1,)
+        assert height.shape == batch_axes + (1,)
+
+        shape = jnp.concatenate([radius, height, jnp.zeros_like(radius)], axis=-1)
+        return Cylinder(pos=center, mat=mat, size=shape)
+    
+    @staticmethod
+    def from_min_cylinder(
+        mesh: trimesh.Trimesh, batch_axes: tuple[int, ...] = ()
+    ) -> Cylinder:
+        """
+        Approximate a minimum bounding cylinder for a mesh.
+        """
+        import trimesh.bounds
+
+        results = trimesh.bounds.minimum_cylinder(mesh)
+
+        assert "transform" in results
+        assert "radius" in results
+        assert "height" in results
+
+        tf_mat = results["transform"]
+        radius = results["radius"]
+        height = results["height"]
+        tf = jaxlie.SE3.from_matrix(tf_mat)
+
+        cap = Cylinder.from_radius_and_height(
+            radius=jnp.array([radius]),
+            height=jnp.array([height]),
+            transform=tf,
+        )
+        return cap
+
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
+        cylinder = trimesh.creation.cylinder(
+            radius=size[0].item(), height=size[1].item()
+        )
+        tf = onp.eye(4)
+        tf[:3, :3] = mat
+        tf[:3, 3] = pos
+        cylinder.vertices = trimesh.transform_points(cylinder.vertices, tf)
+        return cylinder

@@ -22,7 +22,7 @@ from mujoco.mjx._src.collision_types import Collision
 from mujoco.mjx._src.collision_driver import _COLLISION_FUNC
 from mujoco.mjx import GeomType
 
-from jaxmp.coll._coll_mjx_types import CollGeom, Plane, Sphere, Capsule, Ellipsoid, Convex
+from jaxmp.coll._coll_mjx_types import CollGeom, Plane, Sphere, Capsule, Ellipsoid, Convex, Cylinder
 from jaxmp.coll._coll_robot import RobotColl
 
 
@@ -31,8 +31,9 @@ COLL_TYPES: dict[type[CollGeom], GeomType] = {
     Sphere: GeomType.SPHERE,
     Capsule: GeomType.CAPSULE,
     Ellipsoid: GeomType.ELLIPSOID,
-    RobotColl: GeomType.CAPSULE,
     Convex: GeomType.MESH,
+    Cylinder: GeomType.CYLINDER,
+    RobotColl: GeomType.CAPSULE,
 }
 
 def colldist_from_sdf(
@@ -62,7 +63,9 @@ def colldist_from_sdf(
     return _dist
 
 
+@jdc.jit
 def collide(geom_0: CollGeom, geom_1: CollGeom) -> Collision:
+    # Broadcast, and flatten, before feeding it in as input.
     broadcast_shape = jnp.broadcast_shapes(
         geom_0.get_batch_axes(), geom_1.get_batch_axes()
     )
@@ -75,17 +78,17 @@ def collide(geom_0: CollGeom, geom_1: CollGeom) -> Collision:
     @dataclass
     class Model:
         geom_size: jax.Array
-        mesh_convex: jax.Array | None = None
+        mesh_convex: list
 
     @dataclass
     class Data:
         geom_xpos: jax.Array
         geom_xmat: jax.Array
     
-    @dataclass
+    @jdc.pytree_dataclass
     class FunctionKey:
-        types: jax.Array
-        data_ids: jax.Array
+        types: jdc.Static[tuple]
+        data_ids: jdc.Static[tuple]
 
     model = Model(
         geom_size=jnp.array([geom_0.size, geom_1.size]),
@@ -99,8 +102,8 @@ def collide(geom_0: CollGeom, geom_1: CollGeom) -> Collision:
         geom_xmat=jnp.array([geom_0.mat, geom_1.mat])
     )
     key = FunctionKey(
-        types=jnp.array([COLL_TYPES[type(geom_0)], COLL_TYPES[type(geom_1)]]),
-        data_ids=jnp.array([0, 1]),
+        types=(COLL_TYPES[type(geom_0)], COLL_TYPES[type(geom_1)]),
+        data_ids=(0, 1),
     )
 
     result = func(model, data, key, jnp.array([0, 1]))
