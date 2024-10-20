@@ -102,22 +102,24 @@ class RobotFactors:
     def self_coll_cost(
         vals: jaxls.VarValues,
         kin: JaxKinTree,
-        coll: RobotColl,
+        robot_coll: RobotColl,
         var: jaxls.Var[Array],
         eta: float,
         weights: Array,
     ) -> Array:
         """Collision-scaled dist for self-collision."""
         joint_cfg = vals[var]
-        sdf = coll.collide_self(kin, joint_cfg)
-        weights = weights * coll.self_coll_matrix
+        coll = robot_coll.coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]))
+        sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
+        sdf = sdf.dist
+        weights = weights * robot_coll.self_coll_matrix
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     @staticmethod
     def world_coll_cost(
         vals: jaxls.VarValues,
         kin: JaxKinTree,
-        coll: RobotColl,
+        robot_coll: RobotColl,
         var: jaxls.Var[Array],
         other: CollGeom,
         eta: float,
@@ -125,9 +127,10 @@ class RobotFactors:
     ) -> Array:
         """Collision-scaled dist for world collision."""
         joint_cfg = vals[var]
-        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
-        sdf, _, _ = collide(other, coll)
-        sdf = sdf[..., 0] * coll.self_coll_matrix
+        coll = robot_coll.coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]))
+        sdf = collide(coll, other)
+        sdf = sdf.dist
+        sdf = sdf * robot_coll.self_coll_matrix
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     @staticmethod

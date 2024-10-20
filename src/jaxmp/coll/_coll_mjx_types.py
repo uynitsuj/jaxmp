@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from typing import cast
 
+import scipy
 import jax
 import numpy as onp
 import jax.numpy as jnp
@@ -97,7 +98,7 @@ class Plane(CollGeom):
         return jnp.stack([x_axes, y_axes, normal], axis=-1)
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
-        plane = trimesh.creation.box(extents=[5, 5, 0.01])
+        plane = trimesh.creation.box(extents=[5, 5, 0.001])
         tf = onp.eye(4)
         tf[:3, :3] = mat
         tf[:3, 3] = pos
@@ -212,38 +213,168 @@ class Ellipsoid(CollGeom):
 
 @jdc.pytree_dataclass
 class Convex(CollGeom):
-    mesh: jdc.Static[trimesh.Trimesh]
-    # MJX batching works across pose, but one unique mesh at a time.
+    # Experimental. May be slightly buggy.
+    mesh_info: ConvexMesh
+    num_meshes: jdc.Static[int]
+    offset_to_origin: jax.Array
+    mesh_axis: jdc.Static[int]
 
     @staticmethod
-    def from_convex_mesh(mesh: trimesh.Trimesh, batch_axes: tuple[int, ...] = ()) -> Convex:
+    def from_meshes(
+        meshes: list[trimesh.Trimesh],
+        n_verts: int = 32,
+    ) -> Convex:
         """
         Create geometry from convex mesh.
         """
-        # Check if the mesh is convex.
-        assert mesh.is_convex
+        # Make the meshes convex.
+        meshes = [mesh.convex_hull for mesh in meshes]
+        
+        # TODO Check why we must ensure that the mesh includes the origin.
+        # Found that this is necessary for convex collisions to work!
+        offset_to_origin = jnp.array([mesh.centroid for mesh in meshes])
+        for mesh in meshes:
+            mesh.vertices -= mesh.centroid
 
+        # Decimate the mesh, to make convex-convex feasible.
+        meshes = [Convex.decimate(mesh, n_verts=n_verts) for mesh in meshes]
+        mesh_info = [Convex._get_mesh_mjx(mesh) for mesh in meshes]
+
+        def stack_irregular(x):
+            # Pad the meshes to the same length, by re-using the last element.
+            # This assumes that convex collisions are triangle-based.
+            max_len = jnp.array([xi.shape for xi in x]).max(axis=0)
+            pad_width = max_len - jnp.array([xi.shape for xi in x])
+            padded_x = [
+                jnp.pad(
+                    x[i],
+                    jnp.stack([jnp.zeros_like(pad_width[i]), pad_width[i]], axis=-1),
+                    mode="edge",
+                )
+                for i in range(len(x))
+            ]
+            return jnp.stack(padded_x)
+
+        # Stack the mesh information, while padding as necessary.
+        mesh_info = jax.tree.map(
+            lambda *x: stack_irregular(x),
+            *mesh_info
+        )
+
+        batch_axes = (len(meshes),)
+        mesh_axis = 0
         tf = jaxlie.SE3.identity(batch_axes)
+
+        # `size` isn't used for convex meshes -- and we can't use it for th mesh index either,
+        # because that would mean we can have dynamically sized arrays (if N(mesh1) != N(mesh2)).
+        size = jnp.zeros(batch_axes + (3,))
 
         return Convex(
             pos=tf.translation(),
             mat=tf.rotation().as_matrix(),
-            size=jnp.full((*batch_axes, 3), 0),  # unused.
-            mesh=mesh,
+            size=size,  # unused.
+            num_meshes=len(meshes),
+            mesh_info=mesh_info,
+            offset_to_origin=offset_to_origin,
+            mesh_axis=mesh_axis,
         )
     
-    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
-        mesh = self.mesh.copy()
-        tf = onp.eye(4)
-        tf[:3, :3] = mat
-        tf[:3, 3] = pos
-        mesh.vertices = trimesh.transform_points(mesh.vertices, tf)
-        return mesh
+    def transform(self, tf: jaxlie.SE3, mesh_axis: int = 0):
+        broadcast_shape = jnp.broadcast_shapes(
+            self.get_batch_axes(), tf.get_batch_axes()
+        )
+        result = self.broadcast_to(*broadcast_shape, mesh_axis=mesh_axis)
+        result = super(Convex, result).transform(tf)
+        return result
+
+    def broadcast_to(self, *shape, mesh_axis: int = 0):
+        assert shape[mesh_axis] == self.num_meshes or self.num_meshes == 1
+        result = super().broadcast_to(*shape)
+        with jdc.copy_and_mutate(result, validate=False) as result:
+            result.mesh_axis = mesh_axis
+        return result
     
-    def get_mesh_mjx(self) -> ConvexMesh:
+    def reshape(self, *shape, mesh_axis: int = 0):
+        result = super().reshape(*shape)
+        assert result.get_batch_axes()[mesh_axis] == self.num_meshes or self.num_meshes == 1
+        with jdc.copy_and_mutate(result, validate=False) as result:
+            result.mesh_axis = mesh_axis
+        return result
+    
+    @staticmethod
+    def slice_along_mesh_axis(convex: Convex, idx: int, keepdim=True):
+        props = (convex.pos, convex.mat, convex.size)
+        props = jax.tree.map(lambda x: jnp.take(x, idx, convex.mesh_axis), props)
+        if keepdim:
+            props = jax.tree.map(lambda x: jnp.expand_dims(x, convex.mesh_axis), props)
+
+        idx = jnp.clip(idx, max=convex.num_meshes-1) # type: ignore
+        offset_to_origin = convex.offset_to_origin[idx]
+        with jdc.copy_and_mutate(convex.mesh_info, validate=False) as _mesh_info:
+            _mesh_info = jax.tree.map(lambda x: x[idx], _mesh_info)
+        with jdc.copy_and_mutate(convex, validate=False) as convex:
+            convex.pos = props[0]
+            convex.mat = props[1]
+            convex.size = props[2]
+            convex.num_meshes = 1
+            convex.offset_to_origin = offset_to_origin
+            convex.mesh_info = _mesh_info
+
+        return convex
+
+    
+    def to_trimesh(self) -> trimesh.Trimesh:
+        meshes = []
+        for mesh_idx in range(self.num_meshes):
+            curr = Convex.slice_along_mesh_axis(self, mesh_idx, keepdim=False)
+            curr = curr.reshape(-1,)
+            mesh = cast(
+                trimesh.Trimesh,
+                trimesh.PointCloud(
+                    curr.mesh_info.vert,
+                ).convex_hull
+            )
+            mesh.fix_normals()
+            mesh.vertices += curr.offset_to_origin
+            for i in range(curr.get_batch_axes()[0]):
+                tf = onp.eye(4)
+                tf[:3, :3] = curr.mat[i]
+                tf[:3, 3] = curr.pos[i]
+                _mesh = mesh.copy()
+                _mesh.apply_transform(tf)
+                meshes.append(_mesh)
+
+        return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+    
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
+        raise NotImplementedError
+    
+    @staticmethod
+    def decimate(mesh: trimesh.Trimesh, n_verts: int) -> trimesh.Trimesh:
+        """
+        Decimate a mesh to have `n_vert` vertices, for:
+        - stacking mesh information, and
+        - faster collision checks.
+
+        According to https://mujoco.readthedocs.io/en/stable/mjx.html#mjx-the-sharp-bits,
+        For reasonable performance, `n_vert` should be:
+        - <200 for convex-primitive collisions.
+        - <32 for convex-convex collisions.
+        """
+        hull = scipy.spatial.ConvexHull(mesh.vertices, qhull_options=f"TA{n_verts}")
+
+        hull_verts = mesh.vertices[hull.vertices]
+        hull_faces = onp.searchsorted(hull.vertices, hull.simplices.flatten()).reshape(-1, 3)
+
+        _mesh = trimesh.Trimesh(vertices=hull_verts, faces=hull_faces)
+        _mesh.fix_normals()
+        return _mesh
+    
+    @staticmethod
+    def _get_mesh_mjx(mesh) -> ConvexMesh:
         # Based on https://github.com/google-deepmind/mujoco/blob/43a7493d1739d5cb1618de6863f929d99c7a8822/mjx/mujoco/mjx/_src/mesh.py#L280.
-        vert = onp.array(self.mesh.vertices)
-        face = onp.array(self.mesh.faces)
+        vert = onp.array(mesh.vertices)
+        face = onp.array(mesh.faces)
         face_normal = _get_face_norm(vert, face)
         edge, edge_face_normal = _get_edge_normals(face, face_normal)
         face = vert[face]  # materialize full nface x nvert matrix
@@ -255,6 +386,7 @@ class Convex(CollGeom):
             edge=jnp.array(edge),
             edge_face_normal=jnp.array(edge_face_normal),
         )
+
     
 @jdc.pytree_dataclass
 class Cylinder(CollGeom):

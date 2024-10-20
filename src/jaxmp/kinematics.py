@@ -293,6 +293,8 @@ class JaxKinTree:
             assert cfg.shape[-1] == self.num_actuated_joints
 
             # Apply units to delta, by normalizing w/ the joint velocity.
+            # Important for robots with both revolute + prismatic joints
+            # (e.g., fetch, robot grippers).
             _delta = delta * self.joint_vel_limit * 0.01
 
             return cfg + _delta
