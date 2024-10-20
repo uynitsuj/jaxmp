@@ -109,11 +109,8 @@ class RobotFactors:
     ) -> Array:
         """Collision-scaled dist for self-collision."""
         joint_cfg = vals[var]
-        coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
-        sdf, _, _ = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
+        sdf = coll.collide_self(kin, joint_cfg)
         weights = weights * coll.self_coll_matrix
-        sdf = sdf[..., 0]
-        assert sdf.shape == weights.shape
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     @staticmethod
@@ -126,11 +123,11 @@ class RobotFactors:
         eta: float,
         weights: Array,
     ) -> Array:
-        """Collision-scaled dist for world collisio."""
+        """Collision-scaled dist for world collision."""
         joint_cfg = vals[var]
         coll = coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., coll.link_joint_idx, :]))
         sdf, _, _ = collide(other, coll)
-        sdf = sdf[..., 0]
+        sdf = sdf[..., 0] * coll.self_coll_matrix
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
     @staticmethod

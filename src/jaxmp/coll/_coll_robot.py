@@ -6,6 +6,8 @@ Supports World- and self- collision detection (returns signed distance).
 from __future__ import annotations
 from typing import Optional, cast
 
+from jaxmp.coll._coll_mjx_fnc import collide
+from jaxmp.kinematics import JaxKinTree
 from loguru import logger
 
 import trimesh
@@ -21,12 +23,15 @@ from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 import jaxlie
 
-from jaxmp.coll._coll_mjx_types import Capsule
+from jaxmp.coll._coll_mjx_types import Capsule, Convex
 
 
 @jdc.pytree_dataclass
-class RobotColl(Capsule):
+class RobotColl:
     """Collision model for a robot, which can be put into different configurations."""
+    num_coll_links: jdc.Static[int]
+
+    coll_links: jdc.Static[tuple[Convex]]
 
     coll_link_names: jdc.Static[tuple[str]]
     """Names of the links in the robot, length `links`."""
@@ -63,7 +68,7 @@ class RobotColl(Capsule):
         )
 
         # Gather all the collision links.
-        list_coll_link = list[Capsule]()
+        coll_links = list[Convex]()
         idx_parent_joint = list[int]()
         link_names = list[str]()
 
@@ -80,17 +85,15 @@ class RobotColl(Capsule):
                 continue
             assert coll_link.get_batch_axes() == ()
 
-            list_coll_link.append(coll_link)
+            coll_links.append(coll_link)
             idx_parent_joint.append(joint_idx)
             link_names.append(curr_link)
 
             if ignore_immediate_parent:
                 self_coll_ignore.append((joint.parent, joint.child))
 
-        assert len(list_coll_link) > 0, "No collision links found in URDF."
-        logger.info("Found {} collision bodies", len(list_coll_link))
-
-        coll_links = jax.tree.map(lambda *x: jnp.stack(x), *list_coll_link)
+        assert len(coll_links) > 0, "No collision links found in URDF."
+        logger.info("Found {} collision bodies", len(coll_links))
 
         idx_parent_joint = jnp.array(idx_parent_joint)
         link_names = tuple[str](link_names)
@@ -101,16 +104,15 @@ class RobotColl(Capsule):
         assert self_coll_matrix.shape == (len(link_names), len(link_names))
 
         return RobotColl(
-            pos=coll_links.pos,
-            mat=coll_links.mat,
-            size=coll_links.size,
+            num_coll_links=len(coll_links),
+            coll_links=coll_links,
             coll_link_names=link_names,
             link_joint_idx=idx_parent_joint,
             self_coll_matrix=self_coll_matrix,
         )
 
     @staticmethod
-    def _get_coll_link(urdf: yourdfpy.URDF, curr_link: str) -> Optional[Capsule]:
+    def _get_coll_link(urdf: yourdfpy.URDF, curr_link: str) -> Optional[Convex]:
         """
         Get the `CapsuleColl` collision primitives for a given link.
         """
@@ -149,7 +151,20 @@ class RobotColl(Capsule):
         # Create the collision spheres.
         assert isinstance(coll_link_mesh, trimesh.Trimesh), type(coll_link_mesh)
 
-        coll_link = Capsule.from_min_cylinder(coll_link_mesh)
+        if not coll_link_mesh.is_convex:
+            coll_link_mesh = coll_link_mesh.convex_hull
+        
+        import scipy
+        hull = scipy.spatial.ConvexHull(coll_link_mesh.vertices, qhull_options="TA18")
+        hull_verts = coll_link_mesh.vertices[hull.vertices]
+        hull_faces = onp.searchsorted(hull.vertices, hull.simplices.flatten()).reshape(-1, 3)
+        _coll_link_mesh = trimesh.Trimesh(vertices=hull_verts, faces=hull_faces)
+        _coll_link_mesh.fix_normals()
+        coll_link = Convex.from_convex_mesh(_coll_link_mesh)
+
+        # coll_link = Cylinder.from_min_cylinder(coll_link_mesh)
+        # coll_link = Capsule.from_min_cylinder(coll_link_mesh)
+
         return coll_link
 
     def coll_weight(
@@ -197,3 +212,28 @@ class RobotColl(Capsule):
         )
         assert coll_mat.shape == (n_links, n_links)
         return coll_mat
+
+    @jdc.jit
+    def collide_self(self, kin: JaxKinTree, cfg: jax.Array) -> jax.Array:
+        Ts_joint_world = kin.forward_kinematics(cfg)[..., self.link_joint_idx, :]
+        colls = [
+            self.coll_links[i].transform(jaxlie.SE3(Ts_joint_world[..., i, :]))
+            for i in range(self.num_coll_links)
+        ]
+
+        batch_axes = Ts_joint_world.shape[:-2]
+        sdf = jnp.zeros((*batch_axes, self.num_coll_links, self.num_coll_links))
+
+        for i in range(self.num_coll_links - 1):
+            # for j in range(i + 1, self.num_coll_links):
+            j = i + 1
+            _sdf = collide(colls[i], colls[j])[0]
+            _sdf = _sdf.reshape((*batch_axes, -1)).sum(axis=-1)
+            sdf = sdf.at[..., i, j].set(_sdf)
+
+        return sdf
+
+    # def fun(self, coll_i, coll_j):
+    #     _sdf = collide(coll_i,coll_j)[0]
+    #     return _sdf
+        

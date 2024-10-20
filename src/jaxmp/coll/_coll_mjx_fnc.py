@@ -23,7 +23,6 @@ from mujoco.mjx._src.collision_driver import _COLLISION_FUNC
 from mujoco.mjx import GeomType
 
 from jaxmp.coll._coll_mjx_types import CollGeom, Plane, Sphere, Capsule, Ellipsoid, Convex, Cylinder
-from jaxmp.coll._coll_robot import RobotColl
 
 
 COLL_TYPES: dict[type[CollGeom], GeomType] = {
@@ -33,7 +32,6 @@ COLL_TYPES: dict[type[CollGeom], GeomType] = {
     Ellipsoid: GeomType.ELLIPSOID,
     Convex: GeomType.MESH,
     Cylinder: GeomType.CYLINDER,
-    RobotColl: GeomType.CAPSULE,
 }
 
 def colldist_from_sdf(

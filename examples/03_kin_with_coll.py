@@ -5,8 +5,10 @@ Similar to 01_kinematics.py, but with collision detection.
 from typing import Optional
 from pathlib import Path
 import time
+import jax
 from jaxmp.coll import collide
 
+from loguru import logger
 import tyro
 
 import jax.numpy as jnp
@@ -82,21 +84,34 @@ def main(
     # Create factor graph.
     JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
 
+    # print("a")
+    # jax.jit(robot_coll.collide_self).lower(kin, rest_pose)
+    # print("a")
+
+    # breakpoint()
+    start = time.time()
+    Ts_joint_world = kin.forward_kinematics(rest_pose)[..., robot_coll.link_joint_idx, :]
+    jax.jacfwd(
+        lambda x: collide(
+            robot_coll.coll_links[0].transform(jaxlie.SE3(x)),
+            robot_coll.coll_links[0].transform(jaxlie.SE3(x))
+        ),
+    )(Ts_joint_world[0])
+    print("end", time.time() - start)
+
+    start = time.time()
+    jax.jacfwd(lambda x: robot_coll.collide_self(kin, x))(rest_pose)
+    print("end", time.time() - start)
+    # with capsule end 64.22873497009277
+    print("a")
+
+    # breakpoint()
     @jdc.jit
     def solve_ik(
         target_pose: jaxlie.SE3,
-        target_joint_indices: jdc.Static[tuple[int]],
+        target_joint_indices: jax.Array,
     ) -> jnp.ndarray:
         joint_vars = [JointVar(id=0)]
-
-        self_coll_weight_mat = jnp.full(
-            jnp.broadcast_shapes(robot_coll.get_batch_axes(), robot_coll.get_batch_axes()),
-            coll_weight
-        )
-        world_coll_weight_mat = jnp.full(
-            jnp.broadcast_shapes(robot_coll.get_batch_axes(), obstacle.get_batch_axes()),
-            world_coll_weight
-        )
 
         factors: list[jaxls.Factor] = [
             jaxls.Factor(
@@ -114,20 +129,20 @@ def main(
                     robot_coll,
                     joint_vars[0],
                     0.01,
-                    self_coll_weight_mat,
+                    0.5,
                 ),
             ),
-            jaxls.Factor(
-                RobotFactors.world_coll_cost,
-                (
-                    kin,
-                    robot_coll,
-                    joint_vars[0],
-                    obstacle,
-                    0.05,
-                    world_coll_weight_mat,
-                ),
-            ),
+            # jaxls.Factor(
+            #     RobotFactors.world_coll_cost,
+            #     (
+            #         kin,
+            #         robot_coll,
+            #         joint_vars[0],
+            #         obstacle,
+            #         0.05,
+            #         world_coll_weight,
+            #     ),
+            # ),
             jaxls.Factor(
                 RobotFactors.rest_cost,
                 (
@@ -160,11 +175,21 @@ def main(
             initial_vals=jaxls.VarValues.make(joint_vars),
             trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
             termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
-            verbose=False,
         )
 
         joints = solution[joint_vars[0]]
         return joints
+
+    Ts_joint_world = kin.forward_kinematics(rest_pose)[..., robot_coll.link_joint_idx, :]
+    colls = [
+        robot_coll.coll_links[i].transform(jaxlie.SE3(Ts_joint_world[..., i, :]))
+        for i in range(robot_coll.num_coll_links)
+    ]
+    for idx, coll in enumerate(colls):
+        server.scene.add_mesh_trimesh(
+            f"coll_{idx}",
+            coll.to_trimesh()
+        )
 
     collbody_handle = None
     while True:
@@ -198,16 +223,16 @@ def main(
 
         urdf_vis.update_cfg(onp.array(joints))
 
-        coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :]))
-        self_coll_value.value = (collide(coll, coll.reshape(-1, 1))[0].squeeze() * coll.self_coll_matrix).min().item()
-        world_coll_value.value = collide(coll, obstacle.reshape(-1, 1))[0].squeeze().min().item()
-        if visualize_spheres.value:
-            collbody_handle = server.scene.add_mesh_trimesh(
-                "coll",
-                robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :])).to_trimesh()
-            )
-        elif collbody_handle is not None:
-            collbody_handle.remove()
+        # coll = robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :]))
+        # self_coll_value.value = (collide(coll, coll.reshape(-1, 1))[0].squeeze() * coll.self_coll_matrix).min().item()
+        # world_coll_value.value = collide(coll, obstacle.reshape(-1, 1))[0].squeeze().min().item()
+        # if visualize_spheres.value:
+        #     collbody_handle = server.scene.add_mesh_trimesh(
+        #         "coll",
+        #         robot_coll.transform(jaxlie.SE3(kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :])).to_trimesh()
+        #     )
+        # elif collbody_handle is not None:
+        #     collbody_handle.remove()
 
 
 if __name__ == "__main__":

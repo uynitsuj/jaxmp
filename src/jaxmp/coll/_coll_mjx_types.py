@@ -96,8 +96,7 @@ class Plane(CollGeom):
         y_axes = jnp.cross(normal, x_axes)
         return jnp.stack([x_axes, y_axes, normal], axis=-1)
 
-    @staticmethod
-    def _create_one_mesh(pos: jax.Array, mat: jax.Array, size: jax.Array):
+    def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         plane = trimesh.creation.box(extents=[5, 5, 0.01])
         tf = onp.eye(4)
         tf[:3, :3] = mat
