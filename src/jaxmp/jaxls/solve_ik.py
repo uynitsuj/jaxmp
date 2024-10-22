@@ -17,6 +17,7 @@ def solve_ik(
     rot_weight: float,
     rest_weight: float,
     limit_weight: float,
+    manipulability_weight: float,
     rest_pose: jnp.ndarray,
     solver_type: jdc.Static[
         Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
@@ -77,7 +78,7 @@ def solve_ik(
     ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
     ik_weights = ik_weights * freeze_target_xyz_xyz
     for idx, target_joint_idx in enumerate(target_joint_indices):
-        factors.append(
+        factors.extend([
             jaxls.Factor(
                 RobotFactors.ik_cost,
                 (
@@ -88,8 +89,17 @@ def solve_ik(
                     ik_weights,
                     ConstrainedSE3Var(0),
                 ),
+            ),
+            jaxls.Factor.make(
+                RobotFactors.manipulability_cost,
+                (
+                    kin,
+                    joint_vars[0],
+                    target_joint_idx,
+                    jnp.array([manipulability_weight] * kin.num_actuated_joints),
+                ),
             )
-        )
+        ])
 
     graph = jaxls.FactorGraph.make(
         factors,
