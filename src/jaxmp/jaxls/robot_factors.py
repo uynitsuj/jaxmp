@@ -155,19 +155,17 @@ class RobotFactors:
     ):
         """Manipulability cost."""
         joint_cfg: jax.Array = vals[var]
-        manipulability = RobotFactors.manipulability(kin, joint_cfg, target_joint_idx)
-        return (1 / (manipulability + 1e-6)) * weights
+        manipulability = RobotFactors.manip_yoshikawa(kin, joint_cfg, target_joint_idx)
+        return (1 / manipulability + 1e-6) * weights
 
     @staticmethod
-    def manipulability(
+    def manip_yoshikawa(
         kin: JaxKinTree,
         cfg: Array,
         target_joint_idx: int,
     ) -> Array:
-        """Manipulability, as the ratio of the largest to smallest singular value.
-        Small -> close to losing rank -> bad manipulability."""
+        """Manipulability, as the determinant of the Jacobian."""
         jacobian = jax.jacfwd(
             lambda cfg: jaxlie.SE3(kin.forward_kinematics(cfg)).translation()
         )(cfg)[target_joint_idx]
-        eigvals = jnp.linalg.svd(jacobian, compute_uv=False)  # in decreasing order
-        return eigvals[-1] / (eigvals[0] + 1e-6)  # sig_N / sig_1
+        return jnp.sqrt(jnp.linalg.det(jacobian @ jacobian.T))

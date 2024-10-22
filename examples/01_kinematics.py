@@ -5,6 +5,7 @@ Tests robot forward + inverse kinematics using JaxMP.
 from typing import Literal, Optional
 from pathlib import Path
 import time
+from jaxmp.jaxls.robot_factors import RobotFactors
 import tyro
 import viser
 import viser.extras
@@ -106,6 +107,14 @@ def main(
         "Solver type", ["cholmod", "conjugate_gradient", "dense_cholesky"]
     )
 
+    with server.gui.add_folder("Manipulability"):
+        manipulabiltiy_weight_handler = server.gui.add_slider(
+            "weight", 0.0, 0.01, 0.001, 0.00
+        )
+        manipulability_cost_handler = server.gui.add_number(
+            "Yoshikawa cost", 0.001, disabled=True
+        )
+
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
     add_joint_button = server.gui.add_button("Add joint!")
 
@@ -122,8 +131,7 @@ def main(
     urdf_vis.update_cfg(onp.array(joints))
 
     # Add joints.
-    @add_joint_button.on_click
-    def _(_):
+    def add_joint():
         idx = len(target_name_handles)
         target_name_handle = server.gui.add_dropdown(
             f"target joint {idx}",
@@ -142,6 +150,9 @@ def main(
         target_name_handles.append(target_name_handle)
         target_tf_handles.append(target_tf_handle)
         target_frame_handles.append(target_frame_handle)
+
+    add_joint_button.on_click(lambda _: add_joint())
+    add_joint()
 
     # Let the user change the size of the transformcontrol gizmo.
     @tf_size_handle.on_update
@@ -181,10 +192,10 @@ def main(
             time.sleep(0.1)
             continue
 
-        target_joint_indices = [
+        target_joint_indices = jnp.array([
             kin.joint_names.index(target_name_handle.value)
             for target_name_handle in target_name_handles
-        ]
+        ])
         target_pose_list = [
             jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
             for target_tf_handle in target_tf_handles
@@ -192,17 +203,19 @@ def main(
         target_poses = jaxlie.SE3(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
+        manipulability_weight = manipulabiltiy_weight_handler.value
 
         # Solve!
         start_time = time.time()
         base_pose, joints = solve_ik(
             kin,
             target_poses,
-            tuple[int](target_joint_indices),
+            target_joint_indices,
             pos_weight,
             rot_weight,
             rest_weight,
             limit_weight,
+            manipulability_weight,
             rest_pose,
             solver_type_handle.value,
             get_freeze_target_xyz_xyz(),
@@ -222,6 +235,13 @@ def main(
             )
             target_frame_handle.position = onp.array(T_target_world.translation())
             target_frame_handle.wxyz = onp.array(T_target_world.rotation().wxyz)
+
+        # Update manipulability cost.
+        manip_cost = 0
+        for target_joint_idx in target_joint_indices:
+            manip_cost += RobotFactors.manip_yoshikawa(kin, joints, target_joint_idx)
+        manip_cost /= len(target_joint_indices)
+        manipulability_cost_handler.value = onp.array(manip_cost).item()
 
 
 if __name__ == "__main__":
