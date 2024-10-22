@@ -107,12 +107,16 @@ def main(
         "Solver type", ["cholmod", "conjugate_gradient", "dense_cholesky"]
     )
 
+    allow_discontinuous_handle = server.gui.add_checkbox(
+        "Allow discontinuity", initial_value=True
+    )
+
     with server.gui.add_folder("Manipulability"):
         manipulabiltiy_weight_handler = server.gui.add_slider(
             "weight", 0.0, 0.01, 0.001, 0.00
         )
         manipulability_cost_handler = server.gui.add_number(
-            "Yoshikawa cost", 0.001, disabled=True
+            "Yoshikawa index", 0.001, disabled=True
         )
 
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
@@ -204,6 +208,13 @@ def main(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
         manipulability_weight = manipulabiltiy_weight_handler.value
+        
+        if allow_discontinuous_handle.value:
+            initial_pose = rest_pose
+            joint_vel_weight = 0.0
+        else:
+            initial_pose = joints
+            joint_vel_weight = limit_weight
 
         # Solve!
         start_time = time.time()
@@ -216,11 +227,14 @@ def main(
             rest_weight,
             limit_weight,
             manipulability_weight,
-            rest_pose,
+            joint_vel_weight,
+            initial_pose,
             solver_type_handle.value,
             get_freeze_target_xyz_xyz(),
             get_freeze_base_xyz_xyz(),
         )
+        # Ensure all computations are complete before measuring time
+        jax.block_until_ready((base_pose, joints))
         timing_handle.value = (time.time() - start_time) * 1000
 
         # Update visualizations.

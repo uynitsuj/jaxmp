@@ -76,12 +76,13 @@ class RobotFactors:
         vals: jaxls.VarValues,
         kin: JaxKinTree,
         var_curr: jaxls.Var[Array],
-        var_prev: jaxls.Var[Array],
+        var_prev: jaxls.Var[Array] | Array,
         dt: float,
         weights: Array,
     ) -> Array:
         """Joint limit velocity cost."""
-        joint_vel = (vals[var_curr] - vals[var_prev]) / dt
+        prev = vals[var_prev] if isinstance(var_prev, jaxls.Var) else var_prev
+        joint_vel = (vals[var_curr] - prev) / dt
         residual = jnp.maximum(0.0, jnp.abs(joint_vel) - kin.joint_vel_limit)
         assert residual.shape == weights.shape
         return residual * weights

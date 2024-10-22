@@ -94,7 +94,15 @@ class JaxKinTree:
                 joint_vel_limits.append(joint_vel_limit)
 
             # Get the parent joint index and transform for each joint.
-            parent_idx, T_parent_joint = JaxKinTree._get_T_parent_joint(urdf, joint, joint_idx)
+            if joint.origin is None and joint.type == "fixed":
+                # Fixed joint, no transform.
+                logger.info("Found fixed joint with no origin, placing at origin.")
+                parent_idx = -1
+                T_parent_joint = jaxlie.SE3.identity().wxyz_xyz
+            else:
+                parent_idx, T_parent_joint = JaxKinTree._get_T_parent_joint(
+                    urdf, joint, joint_idx
+                )
             idx_parent_joint.append(parent_idx)
             Ts_parent_joint.append(T_parent_joint)
 

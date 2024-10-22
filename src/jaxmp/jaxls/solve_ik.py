@@ -18,6 +18,7 @@ def solve_ik(
     rest_weight: float,
     limit_weight: float,
     manipulability_weight: float,
+    joint_vel_weight: float,
     rest_pose: jnp.ndarray,
     solver_type: jdc.Static[
         Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
@@ -64,6 +65,16 @@ def solve_ik(
                 kin,
                 JointVar(0),
                 jnp.array([limit_weight] * kin.num_actuated_joints),
+            ),
+        ),
+        jaxls.Factor(
+            RobotFactors.joint_limit_vel_cost,
+            (
+                kin,
+                JointVar(0),
+                rest_pose,
+                0.1,
+                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
             ),
         ),
         jaxls.Factor(
