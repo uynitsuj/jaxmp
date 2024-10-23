@@ -46,8 +46,8 @@ class CollGeom(abc.ABC):
     
     def transform(self, tf: jaxlie.SE3):
         with jdc.copy_and_mutate(self, validate=False) as _self:
-            _self.mat = (tf.rotation() @ jaxlie.SO3.from_matrix(self.mat)).as_matrix()
-            _self.pos = tf.apply(self.pos)
+            _self.mat = (tf.rotation() @ jaxlie.SO3.from_matrix(_self.mat)).as_matrix()
+            _self.pos = tf.apply(_self.pos)
         return _self
 
     def to_trimesh(self) -> trimesh.Trimesh:
@@ -279,27 +279,36 @@ class Convex(CollGeom):
             mesh_axis=mesh_axis,
         )
     
-    def transform(self, tf: jaxlie.SE3, mesh_axis: int = 0):
+    def transform(self, tf: jaxlie.SE3):
         broadcast_shape = jnp.broadcast_shapes(
             self.get_batch_axes(), tf.get_batch_axes()
         )
-        result = self.broadcast_to(*broadcast_shape, mesh_axis=mesh_axis)
+        result = self.broadcast_to(*broadcast_shape)
+        assert self.num_meshes == 1 or result.get_batch_axes()[self.mesh_axis] == self.num_meshes
         result = super(Convex, result).transform(tf)
         return result
 
-    def broadcast_to(self, *shape, mesh_axis: int = 0):
-        assert shape[mesh_axis] == self.num_meshes or self.num_meshes == 1
+    def broadcast_to(self, *shape):
+        mesh_axis = self._get_mesh_axis_from_shape(shape)
+        assert self.num_meshes == 1 or shape[mesh_axis] == self.num_meshes
         result = super().broadcast_to(*shape)
         with jdc.copy_and_mutate(result, validate=False) as result:
             result.mesh_axis = mesh_axis
         return result
     
-    def reshape(self, *shape, mesh_axis: int = 0):
+    def reshape(self, *shape, mesh_axis: int | None = None):
+        if mesh_axis is None:
+            mesh_axis = self.mesh_axis
         result = super().reshape(*shape)
-        assert result.get_batch_axes()[mesh_axis] == self.num_meshes or self.num_meshes == 1
+        assert self.num_meshes == 1 or result.get_batch_axes()[mesh_axis] == self.num_meshes
         with jdc.copy_and_mutate(result, validate=False) as result:
             result.mesh_axis = mesh_axis
         return result
+
+    def _get_mesh_axis_from_shape(self, shape):
+        idx_from_right = (len(self.get_batch_axes()) - 1) - self.mesh_axis
+        idx_from_left = (len(shape) - 1) - idx_from_right
+        return idx_from_left
     
     @staticmethod
     def slice_along_mesh_axis(convex: Convex, idx: int, keepdim=True):
@@ -316,6 +325,7 @@ class Convex(CollGeom):
             convex.pos = props[0]
             convex.mat = props[1]
             convex.size = props[2]
+            convex.mesh_axis = 0
             convex.num_meshes = 1
             convex.offset_to_origin = offset_to_origin
             convex.mesh_info = _mesh_info

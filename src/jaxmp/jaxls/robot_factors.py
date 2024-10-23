@@ -10,6 +10,7 @@ import jaxlie
 
 import jaxls
 
+from jaxmp.coll._coll_mjx_types import Convex
 from jaxmp.kinematics import JaxKinTree
 from jaxmp.coll import RobotColl, CollGeom, collide, colldist_from_sdf
 
@@ -111,7 +112,10 @@ class RobotFactors:
         """Collision-scaled dist for self-collision."""
         joint_cfg = vals[var]
         coll = robot_coll.coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]))
-        sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
+        if isinstance(coll, Convex):
+            sdf = collide(coll.reshape(-1, 1, mesh_axis=0), coll.reshape(1, -1, mesh_axis=1))
+        else:
+            sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
         sdf = sdf.dist
         weights = weights * robot_coll.self_coll_matrix
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()

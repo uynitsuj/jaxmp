@@ -67,16 +67,16 @@ def solve_ik(
                 jnp.array([limit_weight] * kin.num_actuated_joints),
             ),
         ),
-        jaxls.Factor(
-            RobotFactors.joint_limit_vel_cost,
-            (
-                kin,
-                JointVar(0),
-                rest_pose,
-                0.1,
-                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-            ),
-        ),
+        # jaxls.Factor(
+        #     RobotFactors.joint_limit_vel_cost,
+        #     (
+        #         kin,
+        #         JointVar(0),
+        #         rest_pose,
+        #         0.1,
+        #         jnp.array([joint_vel_weight] * kin.num_actuated_joints),
+        #     ),
+        # ),
         jaxls.Factor(
             RobotFactors.rest_cost,
             (

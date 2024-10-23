@@ -22,40 +22,48 @@ def main():
     meshes = [trimesh.creation.uv_sphere(radius=0.2) for _ in range(2)]
     convex_0 = Convex.from_meshes(meshes)
     convex_0 = convex_0.transform(
-        jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]]))
+        jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]])),
     )
 
     meshes = [trimesh.creation.uv_sphere(radius=0.2), trimesh.creation.uv_sphere(radius=0.4)]
     convex_1 = Convex.from_meshes(meshes)
     convex_1 = convex_1.transform(
-        jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]]))
+        jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]])),
     )
 
     coll_list = [
-        Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])),
-        Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
-        Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
-        Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
-        Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
-        convex_0.reshape(-1, 1, mesh_axis=0),
+        # Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])).reshape(-1, 1),
+        # Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
+        # Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
+        # Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
+        # Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
+        # convex_1.reshape(-1, 1),
+        convex_1.reshape(-1, 1),
         convex_0.reshape(1, -1, mesh_axis=1),
-        convex_1.reshape(-1, 1, mesh_axis=0),
-        convex_1.reshape(1, -1, mesh_axis=1),
     ]
     handle_list = [server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))]
 
     def update_collisions():
         start_time = time.time()
-        _coll_list = [
-            coll.transform(jaxlie.SE3(jnp.array([*handle.wxyz, *handle.position])))
-            for (coll, handle) in zip(coll_list, handle_list)
-        ]
+        _coll_list = []
+        for (coll, handle) in zip(coll_list, handle_list):
+            _coll = coll.transform(
+                jaxlie.SE3(jnp.array([*handle.wxyz, *handle.position]))
+            )
+            _coll_list.append(_coll)
 
         in_collision_list = [False] * len(coll_list)
 
         for i in range(len(coll_list)):
             for j in range(i + 1, len(coll_list)):
                 collision = collide(_coll_list[i], _coll_list[j])
+
+                assert not jnp.any(collision.dist == jnp.inf)
+                expected_shape = jnp.broadcast_shapes(
+                    _coll_list[i].get_batch_axes(), _coll_list[j].get_batch_axes()
+                )
+                assert collision.dist.shape == expected_shape
+
                 if jnp.any(collision.dist < 0.0):
                     in_collision_list[i], in_collision_list[j] = True, True
 

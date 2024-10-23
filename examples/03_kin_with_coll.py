@@ -20,6 +20,7 @@ import jaxls
 import viser
 import viser.extras
 
+from jaxmp.coll._coll_mjx_types import Convex
 from jaxmp.kinematics import JaxKinTree
 from jaxmp.jaxls.robot_factors import RobotFactors
 from jaxmp.extras.urdf_loader import load_urdf
@@ -102,7 +103,7 @@ def main(
         joint_vars = [JointVar(id=0)]
 
         factors: list[jaxls.Factor] = [
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.limit_cost,
                 (
                     kin,
@@ -110,7 +111,7 @@ def main(
                     jnp.array([limit_weight] * kin.num_actuated_joints),
                 ),
             ),
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.self_coll_cost,
                 (
                     kin,
@@ -120,7 +121,7 @@ def main(
                     jnp.full(robot_coll.coll.get_batch_axes(), coll_weight),
                 ),
             ),
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.world_coll_cost,
                 (
                     kin,
@@ -131,7 +132,7 @@ def main(
                     jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
                 ),
             ),
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.rest_cost,
                 (
                     joint_vars[0],
@@ -141,7 +142,7 @@ def main(
         ]
         for idx, target_joint_idx in enumerate(target_joint_indices):
             factors.append(
-                jaxls.Factor.make(
+                jaxls.Factor(
                     RobotFactors.ik_cost,
                     (
                         kin,
@@ -171,7 +172,22 @@ def main(
         joints = solution[joint_vars[0]]
         return joints
 
+    joints = rest_pose
     while True:
+        if visualize_coll.value:
+            collbody_handle = server.scene.add_mesh_trimesh(
+                "coll",
+                robot_coll.coll.transform(
+                    jaxlie.SE3(
+                        kin.forward_kinematics(joints)[
+                            ..., robot_coll.link_joint_idx, :
+                        ]
+                    )
+                ).to_trimesh(),
+            )
+        elif collbody_handle is not None:
+            collbody_handle.remove()
+
         if len(target_name_handles) == 0:
             time.sleep(0.1)
             continue
@@ -191,6 +207,7 @@ def main(
 
         start = time.time()
         joints = solve_ik(target_poses, tuple[int](target_joint_indices))
+        jax.block_until_ready(joints)
         # Update timing info.
         timing_handle.value = (time.time() - start) * 1000
 
@@ -219,19 +236,6 @@ def main(
             .item()
         )
         world_coll_value.value = collide(coll, obstacle).dist.min().item()
-        if visualize_coll.value:
-            collbody_handle = server.scene.add_mesh_trimesh(
-                "coll",
-                robot_coll.coll.transform(
-                    jaxlie.SE3(
-                        kin.forward_kinematics(joints)[
-                            ..., robot_coll.link_joint_idx, :
-                        ]
-                    )
-                ).to_trimesh(),
-            )
-        elif collbody_handle is not None:
-            collbody_handle.remove()
 
 
 if __name__ == "__main__":

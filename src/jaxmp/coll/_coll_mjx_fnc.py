@@ -55,7 +55,7 @@ class Collision:
     @staticmethod
     def from_broadcast_shape(broadcast_shape) -> Collision:
         return Collision(
-            dist=jnp.full(broadcast_shape, 10.0),
+            dist=jnp.full(broadcast_shape, jnp.inf),
             pos=jnp.zeros(broadcast_shape + (3,)),
             frame=jnp.zeros(broadcast_shape + (3, 3)),
         )
@@ -90,10 +90,10 @@ def collide(geom_0: CollGeom, geom_1: CollGeom) -> Collision:
         collision = _collide(geom_0, geom_1)
 
     elif not isinstance(geom_0, Convex) and isinstance(geom_1, Convex):
-        collision = _collide_primitive_convex(geom_0, geom_1)
+        collision = _collide_coll_convex(geom_0, geom_1)
 
     elif isinstance(geom_0, Convex) and not isinstance(geom_1, Convex):
-        collision = _collide_primitive_convex(geom_1, geom_0)
+        collision = _collide_coll_convex(geom_1, geom_0)
 
     elif isinstance(geom_0, Convex) and isinstance(geom_1, Convex):
         collision = _collide_convex_convex(geom_0, geom_1)
@@ -114,12 +114,8 @@ def _collide(
     broadcast_shape = jnp.broadcast_shapes(
         geom_0.get_batch_axes(), geom_1.get_batch_axes()
     )
-    geom_0 = geom_0.broadcast_to(*broadcast_shape).reshape(
-        -1,
-    )
-    geom_1 = geom_1.broadcast_to(*broadcast_shape).reshape(
-        -1,
-    )
+    geom_0 = geom_0.broadcast_to(*broadcast_shape).reshape(-1,)
+    geom_1 = geom_1.broadcast_to(*broadcast_shape).reshape(-1,)
 
     # Retrieve the function -- while also shuffling all arguments.
     func, geom_0, geom_1 = _get_coll_func(geom_0, geom_1)
@@ -210,107 +206,111 @@ def _set_value_at_axis(
         axis = (axis,)
     axis_det = list(range(len(axis)))
 
+    # Trick to set values at the correct axis.
+    # The expand-dims is important! E.g.,
+    # > foo = jnp.zeros((2,))
+    # > foo.at[0].set(foo) --> Fails
+    # > jnp.expand_dims(foo, 0).at[:, 0].set(foo) --> Works!
     arr = jnp.moveaxis(arr, axis, axis_det)
-    arr = arr.at[idx].set(value.squeeze())
+    arr = jnp.expand_dims(arr, 0).at[:, idx].set(value)[0]
+
     return jnp.moveaxis(arr, axis_det, axis)
 
 
-def _collide_primitive_convex(geom_0: CollGeom, geom_1: Convex) -> Collision:
+def _collide_coll_convex(geom_0: CollGeom, geom_1: Convex) -> Collision:
     # Will broadcast across meshes -- so num_meshes should be 1.
     broadcast_shape = jnp.broadcast_shapes(
         geom_0.get_batch_axes(), geom_1.get_batch_axes()
     )
-    init_coll = Collision.from_broadcast_shape(broadcast_shape)
+    _geom_0 = geom_0.broadcast_to(*broadcast_shape)
+    _geom_1 = geom_1.broadcast_to(*broadcast_shape)
 
-    def body_fun(i, collision):
-        coll = _collide(
-            geom_0,
-            Convex.slice_along_mesh_axis(geom_1, i),
-        )
-        collision = jax.tree.map(
-            lambda x, y: _set_value_at_axis(x, y, i, geom_1.mesh_axis),
-            collision,
-            coll,
-        )
-        return collision
+    if isinstance(_geom_0, Convex):
+        in_axes_0 = _get_mapping_axes_convex(_geom_0, mesh_axis=_geom_1.mesh_axis)[1]
+    else:
+        in_axes_0 = _geom_1.mesh_axis
 
-    collision = jax.lax.fori_loop(0, geom_1.num_meshes, body_fun, init_coll)
+    _geom_1, in_axes_1, out_axes_1 = _get_mapping_axes_convex(_geom_1)
+    collision = jax.vmap(
+        _collide,
+        in_axes=(in_axes_0, in_axes_1),
+        out_axes=out_axes_1,
+    )(_geom_0, _geom_1)
+    breakpoint()
     return collision
 
 
 def _collide_convex_convex(geom_0: Convex, geom_1: Convex) -> Collision:
-    if geom_0.mesh_axis == geom_1.mesh_axis:
-        # try to broadcast the mesh axes
-        if geom_0.num_meshes == geom_1.num_meshes:
-            no_broadcast_mesh_axes = True
-        elif geom_0.num_meshes == 1:
-            geom_0 = geom_0.broadcast_to(
-                *geom_1.get_batch_axes(), mesh_axis=geom_0.mesh_axis
-            )
-            no_broadcast_mesh_axes = True
-        elif geom_1.num_meshes == 1:
-            geom_1 = geom_1.broadcast_to(
-                *geom_0.get_batch_axes(), mesh_axis=geom_0.mesh_axis
-            )
-            no_broadcast_mesh_axes = True
-        else:
-            raise ValueError(
-                f"Cannot broadcast mesh axes {geom_0.mesh_axis} and {geom_1.mesh_axis}, where the shapes are {geom_0.get_batch_axes()} and {geom_1.get_batch_axes()}."
-            )
-    else:
-        no_broadcast_mesh_axes = False
-
-    num_meshes_0 = geom_0.num_meshes
-    num_meshes_1 = geom_1.num_meshes
-
-    def body_fun(carry, _):
-        i, coll = carry
-        if no_broadcast_mesh_axes:
-            idx_0 = i
-            idx_1 = i
-        else:
-            idx_0 = i % num_meshes_0
-            idx_1 = i // num_meshes_0
-
-        _coll = _collide(
-            Convex.slice_along_mesh_axis(geom_0, idx_0),
-            Convex.slice_along_mesh_axis(geom_1, idx_1),
-        )
-
-        if no_broadcast_mesh_axes:
-            coll = jax.tree.map(
-                lambda x, y: _set_value_at_axis(x, y, idx_0, geom_0.mesh_axis),
-                coll,
-                _coll,
-            )
-        else:
-            coll = jax.tree.map(
-                lambda x, y: (
-                    _set_value_at_axis(
-                        x,
-                        y,
-                        (idx_0, idx_1),
-                        (geom_0.mesh_axis, geom_1.mesh_axis),
-                    )
-                ),
-                coll,
-                _coll,
-            )
-
-        i = i + 1
-        return (i, coll), None
-
     broadcast_shape = jnp.broadcast_shapes(
         geom_0.get_batch_axes(), geom_1.get_batch_axes()
     )
-    init_coll = Collision.from_broadcast_shape(broadcast_shape)
-    collision = jax.lax.scan(
-        body_fun,
-        (0, init_coll),
-        None,
-        length=(
-            max(num_meshes_0, num_meshes_1) if no_broadcast_mesh_axes else
-            (num_meshes_0) * (num_meshes_1)
-        ),
-    )[0][-1]
+    _geom_0 = geom_0.broadcast_to(*broadcast_shape)
+    _geom_1 = geom_1.broadcast_to(*broadcast_shape)
+
+    if _geom_0.mesh_axis == _geom_1.mesh_axis:
+        _geom_0, in_axes_0, out_axes_0 = _get_mapping_axes_convex(_geom_0)
+        _geom_1, in_axes_1, out_axes_1 = _get_mapping_axes_convex(_geom_1)
+
+        collision = jax.vmap(
+            _collide,
+            in_axes=(in_axes_0, in_axes_1),
+            out_axes=out_axes_0,
+        )(_geom_0, _geom_1)
+
+    else:
+        # Known bug: (collision.dist).shape != broadcast_shape.
+        # Nested `vmap` will blow up memory requirements for `jaxls`.
+        init_coll = Collision.from_broadcast_shape(broadcast_shape)
+
+        def body_fun(i, collision):
+            coll = _collide_coll_convex(
+                Convex.slice_along_mesh_axis(_geom_0, i, keepdim=False),
+                _geom_1,
+            )
+            collision = jax.tree.map(
+                lambda x, y: _set_value_at_axis(x, y, i, _geom_0.mesh_axis),
+                collision,
+                coll,
+            )
+            return collision
+
+        collision = jax.lax.fori_loop(0, _geom_0.num_meshes, body_fun, init_coll)
+
     return collision
+
+def _get_mapping_axes_convex(geom: Convex, mesh_axis: int | None = None) -> tuple[Convex, Convex, Collision]:
+    in_axes = jax.tree.map(lambda _: 0, geom)
+
+    # If `geom` is a single mesh, we pre-emptively slice it,
+    # and don't broadcast across the mesh axis.
+    # If num_mesh=1, then we allow mesh_axis.ndim != num_mesh.
+
+    if mesh_axis is None:
+        mesh_axis = geom.mesh_axis
+
+    if geom.num_meshes == 1:
+        mesh_info = jax.tree_map(lambda x: jnp.take(x, 0, 0), geom.mesh_info)
+        with jdc.copy_and_mutate(geom, validate=False) as geom:
+            geom.offset_to_origin = jnp.take(geom.offset_to_origin, 0, 0)
+            geom.mesh_info = mesh_info
+        mesh_info_axes = jax.tree_map(lambda x: None, geom.mesh_info)
+        with jdc.copy_and_mutate(in_axes, validate=False) as in_axes:
+            in_axes.mesh_info = mesh_info_axes
+            in_axes.offset_to_origin = None
+
+    with jdc.copy_and_mutate(in_axes, validate=False) as in_axes:
+        in_axes.pos = mesh_axis
+        in_axes.mat = mesh_axis
+        in_axes.size = mesh_axis
+        in_axes.num_meshes = 1
+
+    with jdc.copy_and_mutate(geom, validate=False) as geom:
+        geom.num_meshes = 1
+
+    out_axes = Collision(
+        dist=mesh_axis,
+        pos=mesh_axis,
+        frame=mesh_axis
+    )
+
+    return geom, in_axes, out_axes
