@@ -19,27 +19,17 @@ def main():
     server = viser.ViserServer()
     timing_handle = server.gui.add_number("Timing (ms)", 0.001, disabled=True)
 
-    meshes = [trimesh.creation.uv_sphere(radius=0.2) for _ in range(2)]
-    convex_0 = Convex.from_meshes(meshes)
+    convex_0 = Convex.from_mesh(trimesh.creation.uv_sphere(radius=0.2))
     convex_0 = convex_0.transform(
         jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]])),
     )
 
-    meshes = [trimesh.creation.uv_sphere(radius=0.2), trimesh.creation.uv_sphere(radius=0.4)]
-    convex_1 = Convex.from_meshes(meshes)
-    convex_1 = convex_1.transform(
-        jaxlie.SE3.from_translation(jnp.array([[0.0, 0, 0], [1.0, 0, 0]])),
-    )
-
     coll_list = [
-        # Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])).reshape(-1, 1),
-        # Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
-        # Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
-        # Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
-        # Convex.from_meshes([trimesh.creation.uv_sphere(radius=0.2)]),
-        # convex_1.reshape(-1, 1),
-        convex_1.reshape(-1, 1),
-        convex_0.reshape(1, -1, mesh_axis=1),
+        Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])).reshape(-1, 1),
+        Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
+        Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
+        convex_0.reshape(1, -1),
+        convex_0.reshape(-1, 1),
     ]
     handle_list = [server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))]
 
