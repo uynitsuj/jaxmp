@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from typing import cast
 
+import trimesh
 import scipy
 import jax
 import numpy as onp
@@ -18,7 +19,6 @@ import jax_dataclasses as jdc
 
 from mujoco.mjx._src.types import ConvexMesh
 from mujoco.mjx._src.mesh import _get_face_norm, _get_edge_normals
-import trimesh
 
 
 @jdc.pytree_dataclass

@@ -1,12 +1,10 @@
 """
 Differentiable robot collision model, implemented in JAX.
-Supports World- and self- collision detection (returns signed distance).
 """
 
 from __future__ import annotations
-from typing import Callable, Generic, Optional, TypeVar, cast
+from typing import Callable, Optional, cast
 
-from jaxmp.kinematics import JaxKinTree
 from loguru import logger
 
 import trimesh
@@ -16,14 +14,13 @@ import yourdfpy
 import jax
 from jax import Array
 import jax.numpy as jnp
-import numpy as onp
 
 from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 
-from jaxmp.coll._coll_mjx_types import Capsule, CollGeom, Convex
+from jaxmp.coll.collide_types import Capsule, CollGeom
 
-def capsules_from_meshes(meshes: list[trimesh.Trimesh]) -> Capsule:
+def _capsules_from_meshes(meshes: list[trimesh.Trimesh]) -> Capsule:
     capsules = [Capsule.from_min_cylinder(mesh) for mesh in meshes]
     return jax.tree.map(
         lambda *args: jnp.stack(args), *capsules
@@ -48,7 +45,7 @@ class RobotColl:
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
-        coll_handler: Callable[[list[trimesh.Trimesh]], CollGeom] = capsules_from_meshes,
+        coll_handler: Callable[[list[trimesh.Trimesh]], CollGeom] = _capsules_from_meshes,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):

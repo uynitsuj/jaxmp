@@ -4,18 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaxmp"
-version = "0.0.1"
+version = "0.0.0"
+description = "Robot Planning with JAX"
+readme = "README.md"
+license = { text="MIT" }
 requires-python = ">=3.12"
-
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
 dependencies = [
+    "tyro",
     "jax>=0.4.0",
     "jaxlib",
-    "jaxtyping",
     "jaxlie>=1.0.0",
     "jax_dataclasses>=1.0.0",
-    "jaxls",
-    "tyro",
-    "yourdfpy",
-    "viser",
+    "jaxtyping",
+    "loguru",
     "robot_descriptions",
+    "jaxls",
+    "mujoco-mjx",
+]
+
+[project.optional-dependencies]
+examples = [
+    "viser>=0.2.0",
 ]

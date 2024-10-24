@@ -1,5 +1,5 @@
-"""Common `jaxls` factors for robot control, via wrapping `JaxKinTree` and `RobotColl`.
-"""
+"""Common `jaxls` factors for robot control, via wrapping `JaxKinTree` and `RobotColl`."""
+
 from typing import Optional
 
 import jax
@@ -10,9 +10,9 @@ import jaxlie
 
 import jaxls
 
-from jaxmp.coll._coll_mjx_types import Convex
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll import RobotColl, CollGeom, collide, colldist_from_sdf
+from jaxmp.coll import CollGeom, collide, colldist_from_sdf, RobotColl
+
 
 class RobotFactors:
     """Helper class for using `jaxls` factors with a `JaxKinTree` and `RobotColl`."""
@@ -21,7 +21,7 @@ class RobotFactors:
     def get_var_class(
         kin: JaxKinTree, default_val: Optional[Array] = None
     ) -> type[jaxls.Var[Array]]:
-        """Get the Variable class for this robot. Default value is mid-point of limits."""
+        """Get the Variable class for this robot. Default value is `(limits_upper + limits_lower) / 2`."""
         if default_val is None:
             default_val = (kin.limits_upper + kin.limits_lower) / 2
 
@@ -35,6 +35,26 @@ class RobotFactors:
         return JointVar
 
     @staticmethod
+    def get_constrained_se3(
+        freeze_base_xyz_xyz: Array,
+    ) -> type[jaxls.Var[jaxlie.SE3]]:
+        """Create a `SE3Var` with certain axes frozen."""
+
+        def retract_fn(transform: jaxlie.SE3, delta: jax.Array) -> jaxlie.SE3:
+            """Same as jaxls.SE3Var.retract_fn, but removing updates on certain axes."""
+            delta = delta * (1 - freeze_base_xyz_xyz)
+            return jaxls.SE3Var.retract_fn(transform, delta)
+
+        class ConstrainedSE3Var(
+            jaxls.Var[jaxlie.SE3],
+            default_factory=lambda: jaxlie.SE3.identity(),
+            tangent_dim=jaxlie.SE3.tangent_dim,
+            retract_fn=retract_fn,
+        ): ...
+
+        return ConstrainedSE3Var
+
+    @staticmethod
     def ik_cost(
         vals: jaxls.VarValues,
         kin: JaxKinTree,
@@ -42,11 +62,17 @@ class RobotFactors:
         target_pose: jaxlie.SE3,
         target_joint_idx: jdc.Static[int],
         weights: Array,
-        base_tf_var: Optional[jaxls.Var] = None,
+        base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Array:
         """Pose cost."""
         joint_cfg: jax.Array = vals[var]
-        base_tf = jaxlie.SE3.identity() if base_tf_var is None else vals[base_tf_var]
+        if isinstance(base_tf_var, jaxls.Var):
+            base_tf = vals[base_tf_var]
+        elif isinstance(base_tf_var, jaxlie.SE3):
+            base_tf = base_tf_var
+        else:
+            base_tf = jaxlie.SE3.identity()
+
         Ts_joint_world = kin.forward_kinematics(joint_cfg)
         residual = (
             (base_tf @ jaxlie.SE3(Ts_joint_world[target_joint_idx])).inverse()
@@ -65,9 +91,8 @@ class RobotFactors:
     ) -> Array:
         """Limit cost."""
         joint_cfg: jax.Array = vals[var]
-        residual = (
-            jnp.maximum(0.0, joint_cfg - kin.limits_upper) +
-            jnp.maximum(0.0, kin.limits_lower - joint_cfg)
+        residual = jnp.maximum(0.0, joint_cfg - kin.limits_upper) + jnp.maximum(
+            0.0, kin.limits_lower - joint_cfg
         )
         assert residual.shape == weights.shape
         return residual * weights
@@ -108,15 +133,23 @@ class RobotFactors:
         var: jaxls.Var[Array],
         eta: float,
         weights: Array,
+        base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Array:
         """Collision-scaled dist for self-collision."""
-        joint_cfg = vals[var]
-        coll = robot_coll.coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]))
-        if isinstance(coll, Convex):
-            sdf = collide(coll.reshape(-1, 1, mesh_axis=0), coll.reshape(1, -1, mesh_axis=1))
+        joint_cfg: jax.Array = vals[var]
+        if isinstance(base_tf_var, jaxls.Var):
+            base_tf = vals[base_tf_var]
+        elif isinstance(base_tf_var, jaxlie.SE3):
+            base_tf = base_tf_var
         else:
-            sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1))
-        sdf = sdf.dist
+            base_tf = jaxlie.SE3.identity()
+
+        joint_cfg = vals[var]
+        Ts_joint_world = base_tf @ jaxlie.SE3(
+            kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]
+        )
+        coll = robot_coll.coll.transform(Ts_joint_world)
+        sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1)).dist
         weights = weights * robot_coll.self_coll_matrix
         return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
 
@@ -129,10 +162,22 @@ class RobotFactors:
         other: CollGeom,
         eta: float,
         weights: Array,
+        base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Array:
         """Collision-scaled dist for world collision."""
+        joint_cfg: jax.Array = vals[var]
+        if isinstance(base_tf_var, jaxls.Var):
+            base_tf = vals[base_tf_var]
+        elif isinstance(base_tf_var, jaxlie.SE3):
+            base_tf = base_tf_var
+        else:
+            base_tf = jaxlie.SE3.identity()
+
         joint_cfg = vals[var]
-        coll = robot_coll.coll.transform(jaxlie.SE3(kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]))
+        Ts_joint_world = base_tf @ jaxlie.SE3(
+            kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]
+        )
+        coll = robot_coll.coll.transform(Ts_joint_world)
         sdf = collide(coll, other)
         sdf = sdf.dist
         sdf = sdf * robot_coll.self_coll_matrix
@@ -146,7 +191,7 @@ class RobotFactors:
         weights: Array,
     ) -> Array:
         """Smoothness cost, for trajectories etc."""
-        residual = (vals[var_curr] - vals[var_past])
+        residual = vals[var_curr] - vals[var_past]
         assert residual.shape == weights.shape
         return residual * weights
 

@@ -22,7 +22,7 @@ from jaxtyping import Float
 from mujoco.mjx._src.collision_driver import _COLLISION_FUNC
 from mujoco.mjx import GeomType
 
-from jaxmp.coll._coll_mjx_types import (
+from .collide_types import (
     CollGeom,
     Plane,
     Sphere,

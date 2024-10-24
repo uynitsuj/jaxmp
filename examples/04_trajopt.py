@@ -18,7 +18,7 @@ import jax_dataclasses as jdc
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.jaxls.robot_factors import RobotFactors
+from jaxmp.robot_factors import RobotFactors
 
 
 @jdc.jit

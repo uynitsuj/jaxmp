@@ -1,3 +1,11 @@
-from ._coll_mjx_fnc import collide, colldist_from_sdf
-from ._coll_mjx_types import Capsule, Plane, Sphere, Ellipsoid, CollGeom, Convex
-from ._coll_robot import RobotColl
+from .collide import collide as collide
+from .collide import Collision as Collision
+from .collide import colldist_from_sdf as colldist_from_sdf
+from .collide_types import CollGeom as CollGeom
+from .collide_types import Plane as Plane
+from .collide_types import Sphere as Sphere
+from .collide_types import Capsule as Capsule
+from .collide_types import Ellipsoid as Ellipsoid
+from .collide_types import Convex as Convex
+from .collide_types import Cylinder as Cylinder
+from .robot_coll import RobotColl as RobotColl

@@ -1,4 +1,4 @@
-""" 02_collbody.py
+"""02_collbody.py
 Tests the different collision bodies, as defined in `collbody.py`.
 """
 
@@ -13,7 +13,7 @@ import viser
 import viser.extras
 
 from jaxmp.coll import collide, Capsule, Sphere, Plane, Convex
-# from jaxmp.coll._coll_mjx_types import Convex
+
 
 def main():
     server = viser.ViserServer()
@@ -25,18 +25,24 @@ def main():
     )
 
     coll_list = [
-        Plane.from_point_and_normal(jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])).reshape(-1, 1),
+        Plane.from_point_and_normal(
+            jnp.zeros((3,)), jnp.array([0.0, 0.0, 1.0])
+        ).reshape(-1, 1),
         Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
-        Capsule.from_radius_and_height(jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()),
+        Capsule.from_radius_and_height(
+            jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()
+        ),
         convex_0.reshape(1, -1),
         convex_0.reshape(-1, 1),
     ]
-    handle_list = [server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))]
+    handle_list = [
+        server.scene.add_transform_controls(f"coll_{i}") for i in range(len(coll_list))
+    ]
 
     def update_collisions():
         start_time = time.time()
         _coll_list = []
-        for (coll, handle) in zip(coll_list, handle_list):
+        for coll, handle in zip(coll_list, handle_list):
             _coll = coll.transform(
                 jaxlie.SE3(jnp.array([*handle.wxyz, *handle.position]))
             )
@@ -70,10 +76,10 @@ def main():
                 mesh.visual.vertex_colors = onp.array([0.5, 1.0, 0.5, 1.0])
             server.scene.add_mesh_trimesh(f"coll_mesh_{i}", mesh)
 
-
     while True:
         update_collisions()
         time.sleep(0.1)
+
 
 if __name__ == "__main__":
     main()

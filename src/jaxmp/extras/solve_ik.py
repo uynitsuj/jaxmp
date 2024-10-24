@@ -1,30 +1,39 @@
 from typing import Literal, Optional
-import jax
-import jaxlie
-import jax_dataclasses as jdc
-import jaxls
-from jaxmp.jaxls.robot_factors import RobotFactors
-from jaxmp.kinematics import JaxKinTree
 
+import jax
 import jax.numpy as jnp
+import jaxlie
+import jaxls
+import jax_dataclasses as jdc
+
+from jaxmp.robot_factors import RobotFactors
+from jaxmp.kinematics import JaxKinTree
+from jaxmp.coll import RobotColl, CollGeom
+
 
 @jdc.jit
 def solve_ik(
     kin: JaxKinTree,
     target_pose: jaxlie.SE3,
     target_joint_indices: jax.Array,
-    pos_weight: float,
-    rot_weight: float,
-    rest_weight: float,
-    limit_weight: float,
-    manipulability_weight: float,
-    joint_vel_weight: float,
     rest_pose: jnp.ndarray,
-    solver_type: jdc.Static[
-        Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
-    ] = "conjugate_gradient",
+    *,
+    pos_weight: float = 5.0,
+    rot_weight: float = 1.0,
+    rest_weight: float = 0.01,
+    limit_weight: float = 100.0,
+    manipulability_weight: float = 0.0,
+    joint_vel_weight: float = 0.0,
+    self_coll_weight: float = 2.0,
+    world_coll_weight: float = 10.0,
+    robot_coll: Optional[RobotColl] = None,
+    world_coll_list: list[CollGeom] = [],
+    solver_type: jdc.Static[Literal[
+        "cholmod", "conjugate_gradient", "dense_cholesky"
+    ]] = "conjugate_gradient",
     freeze_target_xyz_xyz: Optional[jnp.ndarray] = None,
     freeze_base_xyz_xyz: Optional[jnp.ndarray] = None,
+    dt: float = 0.01,
 ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """
     Solve IK for the robot.
@@ -43,18 +52,7 @@ def solve_ik(
         freeze_base_xyz_xyz = jnp.ones(6)
 
     JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
-
-    def retract_fn(transform: jaxlie.SE3, delta: jax.Array) -> jaxlie.SE3:
-        """Same as jaxls.SE3Var.retract_fn, but removing updates on certain axes."""
-        delta = delta * (1 - freeze_base_xyz_xyz)
-        return jaxls.SE3Var.retract_fn(transform, delta)
-
-    class ConstrainedSE3Var(
-        jaxls.Var[jaxlie.SE3],
-        default_factory=lambda: jaxlie.SE3.identity(),
-        tangent_dim=jaxlie.SE3.tangent_dim,
-        retract_fn=retract_fn,
-    ): ...
+    ConstrainedSE3Var = RobotFactors.get_constrained_se3(freeze_base_xyz_xyz)
 
     joint_vars = [JointVar(0), ConstrainedSE3Var(0)]
 
@@ -67,16 +65,16 @@ def solve_ik(
                 jnp.array([limit_weight] * kin.num_actuated_joints),
             ),
         ),
-        # jaxls.Factor(
-        #     RobotFactors.joint_limit_vel_cost,
-        #     (
-        #         kin,
-        #         JointVar(0),
-        #         rest_pose,
-        #         0.1,
-        #         jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-        #     ),
-        # ),
+        jaxls.Factor(
+            RobotFactors.joint_limit_vel_cost,
+            (
+                kin,
+                JointVar(0),
+                rest_pose,
+                dt,
+                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
+            ),
+        ),
         jaxls.Factor(
             RobotFactors.rest_cost,
             (
@@ -101,7 +99,7 @@ def solve_ik(
                     ConstrainedSE3Var(0),
                 ),
             ),
-            jaxls.Factor.make(
+            jaxls.Factor(
                 RobotFactors.manipulability_cost,
                 (
                     kin,
@@ -112,6 +110,36 @@ def solve_ik(
             )
         ])
 
+    if robot_coll is not None:
+        factors.append(
+            jaxls.Factor(
+                RobotFactors.self_coll_cost,
+                (
+                    kin,
+                    robot_coll,
+                    JointVar(0),
+                    0.01,
+                    jnp.full(robot_coll.coll.get_batch_axes(), self_coll_weight),
+                    ConstrainedSE3Var(0),
+                ),
+            ),
+        )
+        for world_coll in world_coll_list:
+            factors.append(
+                jaxls.Factor(
+                    RobotFactors.world_coll_cost,
+                    (
+                        kin,
+                        robot_coll,
+                        JointVar(0),
+                        world_coll,
+                        0.05,
+                        jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
+                        ConstrainedSE3Var(0),
+                    ),
+                ),
+            )
+
     graph = jaxls.FactorGraph.make(
         factors,
         joint_vars,
@@ -121,7 +149,11 @@ def solve_ik(
         linear_solver=solver_type,
         initial_vals=jaxls.VarValues.make(joint_vars),
         trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
-        termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
+        termination=jaxls.TerminationConfig(
+            gradient_tolerance=1e-5,
+            parameter_tolerance=1e-5,
+            max_iterations=40,
+        ),
         verbose=False,
     )
 

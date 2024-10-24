@@ -1,5 +1,5 @@
 """03_kin_with_coll.py
-Similar to 01_kinematics.py, but with collision detection.
+Similar to 01_kinematics.py, but with collision avoidance as a cost.
 """
 
 from typing import Optional
@@ -13,18 +13,14 @@ import tyro
 import jax.numpy as jnp
 import jaxlie
 import numpy as onp
-import jax_dataclasses as jdc
-
-import jaxls
 
 import viser
 import viser.extras
 
-from jaxmp.coll._coll_mjx_types import Convex
-from jaxmp.kinematics import JaxKinTree
-from jaxmp.jaxls.robot_factors import RobotFactors
+from jaxmp import JaxKinTree
+from jaxmp.coll import Plane, RobotColl, Sphere
 from jaxmp.extras.urdf_loader import load_urdf
-from jaxmp.coll import RobotColl, Plane
+from jaxmp.extras.solve_ik import solve_ik
 
 
 def main(
@@ -33,8 +29,8 @@ def main(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    coll_weight: float = 5.0,
-    world_coll_weight: float = 100.0,
+    self_coll_weight: float = 2.0,
+    world_coll_weight: float = 10.0,
     robot_urdf_path: Optional[Path] = None,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
@@ -50,13 +46,22 @@ def main(
     server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
 
     # Create ground plane as an obstacle (world collision)!
-    obstacle = Plane.from_point_and_normal(
+    ground_obs = Plane.from_point_and_normal(
         jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, 1.0])
     )
-    server.scene.add_mesh_trimesh("ground_plane", obstacle.to_trimesh())
+    server.scene.add_mesh_trimesh("ground_plane", ground_obs.to_trimesh())
     server.scene.add_grid(
         "ground", width=3, height=3, cell_size=0.1, position=(0.0, 0.0, 0.001)
     )
+
+    # Also add a movable sphere as an obstacle (world collision).
+    sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
+    sphere_obs_handle = server.scene.add_transform_controls(
+        "sphere_obs", scale=0.2, position=(0.2, 0.0, 0.2)
+    )
+    server.scene.add_mesh_trimesh("sphere_obs/mesh", sphere_obs.to_trimesh())
+
+    # Visualize collision distances.
     self_coll_value = server.gui.add_number(
         "max. coll (self)", 0.0, step=0.01, disabled=True
     )
@@ -72,8 +77,7 @@ def main(
     target_tf_handles: list[viser.TransformControlsHandle] = []
     target_frame_handles: list[viser.FrameHandle] = []
 
-    @add_joint_button.on_click
-    def _(_):
+    def add_joint():
         # Show target joint name.
         idx = len(target_name_handles)
         target_name_handle = server.gui.add_dropdown(
@@ -90,89 +94,14 @@ def main(
         target_tf_handles.append(target_tf_handle)
         target_frame_handles.append(target_frame_handle)
 
-    # Create factor graph.
-    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
-
-    collbody_handle = None
-
-    @jdc.jit
-    def solve_ik(
-        target_pose: jaxlie.SE3,
-        target_joint_indices: jax.Array,
-    ) -> jnp.ndarray:
-        joint_vars = [JointVar(id=0)]
-
-        factors: list[jaxls.Factor] = [
-            jaxls.Factor(
-                RobotFactors.limit_cost,
-                (
-                    kin,
-                    joint_vars[0],
-                    jnp.array([limit_weight] * kin.num_actuated_joints),
-                ),
-            ),
-            jaxls.Factor(
-                RobotFactors.self_coll_cost,
-                (
-                    kin,
-                    robot_coll,
-                    joint_vars[0],
-                    0.01,
-                    jnp.full(robot_coll.coll.get_batch_axes(), coll_weight),
-                ),
-            ),
-            jaxls.Factor(
-                RobotFactors.world_coll_cost,
-                (
-                    kin,
-                    robot_coll,
-                    joint_vars[0],
-                    obstacle,
-                    0.05,
-                    jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
-                ),
-            ),
-            jaxls.Factor(
-                RobotFactors.rest_cost,
-                (
-                    joint_vars[0],
-                    jnp.array([rest_weight] * kin.num_actuated_joints),
-                ),
-            ),
-        ]
-        for idx, target_joint_idx in enumerate(target_joint_indices):
-            factors.append(
-                jaxls.Factor(
-                    RobotFactors.ik_cost,
-                    (
-                        kin,
-                        joint_vars[0],
-                        jaxlie.SE3(target_pose.wxyz_xyz[idx]),
-                        target_joint_idx,
-                        jnp.array([pos_weight] * 3 + [rot_weight] * 3),
-                    ),
-                )
-            )
-
-        graph = jaxls.FactorGraph.make(
-            factors,
-            joint_vars,
-            use_onp=False,
-        )
-        solution = graph.solve(
-            linear_solver="conjugate_gradient",
-            initial_vals=jaxls.VarValues.make(joint_vars),
-            trust_region=jaxls.TrustRegionConfig(lambda_initial=0.1),
-            termination=jaxls.TerminationConfig(
-                gradient_tolerance=1e-5, parameter_tolerance=1e-5
-            ),
-            verbose=False,
-        )
-
-        joints = solution[joint_vars[0]]
-        return joints
+    add_joint_button.on_click(lambda _: add_joint())
+    add_joint()
 
     joints = rest_pose
+
+    # Create factor graph.
+    collbody_handle = None
+
     while True:
         if visualize_coll.value:
             collbody_handle = server.scene.add_mesh_trimesh(
@@ -192,10 +121,12 @@ def main(
             time.sleep(0.1)
             continue
 
-        target_joint_indices = [
-            kin.joint_names.index(target_name_handle.value)
-            for target_name_handle in target_name_handles
-        ]
+        target_joint_indices = jnp.array(
+            [
+                kin.joint_names.index(target_name_handle.value)
+                for target_name_handle in target_name_handles
+            ]
+        )
         target_pose_list = [
             jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
             for target_tf_handle in target_tf_handles
@@ -205,8 +136,29 @@ def main(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
 
+        curr_sphere_obs = sphere_obs.transform(
+            jaxlie.SE3(
+                jnp.array([*sphere_obs_handle.wxyz, *sphere_obs_handle.position])
+            )
+        )
+
         start = time.time()
-        joints = solve_ik(target_poses, tuple[int](target_joint_indices))
+        _, joints = solve_ik(
+            kin,
+            target_pose=target_poses,
+            target_joint_indices=target_joint_indices,
+            pos_weight=pos_weight,
+            rot_weight=rot_weight,
+            rest_weight=rest_weight,
+            limit_weight=limit_weight,
+            manipulability_weight=0.0,
+            joint_vel_weight=0.0,
+            rest_pose=rest_pose,
+            robot_coll=robot_coll,
+            world_coll_list=[curr_sphere_obs, ground_obs],
+            self_coll_weight=self_coll_weight,
+            world_coll_weight=world_coll_weight,
+        )
         jax.block_until_ready(joints)
         # Update timing info.
         timing_handle.value = (time.time() - start) * 1000
@@ -235,7 +187,10 @@ def main(
             .min()
             .item()
         )
-        world_coll_value.value = collide(coll, obstacle).dist.min().item()
+        world_coll_value.value = min(
+            collide(coll, ground_obs).dist.min().item(),
+            collide(coll, curr_sphere_obs).dist.min().item(),
+        )
 
 
 if __name__ == "__main__":

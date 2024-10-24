@@ -5,7 +5,6 @@ Tests robot forward + inverse kinematics using JaxMP.
 from typing import Literal, Optional
 from pathlib import Path
 import time
-from jaxmp.jaxls.robot_factors import RobotFactors
 from loguru import logger
 import tyro
 import viser
@@ -16,9 +15,9 @@ import jax.numpy as jnp
 import jaxlie
 import numpy as onp
 
+from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.extras.urdf_loader import load_urdf
-from jaxmp.kinematics import JaxKinTree
-from jaxmp.jaxls.solve_ik import solve_ik
+from jaxmp.extras.solve_ik import solve_ik
 
 try:
     import sksparse
@@ -110,14 +109,19 @@ def main(
     tf_size_handle = server.gui.add_slider(
         "Gizmo size", min=0.01, max=0.4, step=0.01, initial_value=0.2
     )
+
+    if sksparse is None:
+        solver_types = ("conjugate_gradient", "dense_cholesky")
+    else:
+        solver_types = ("conjugate_gradient", "dense_cholesky", "cholmod")
     solver_type_handle = server.gui.add_dropdown(
         "Solver type",
-        ["conjugate_gradient", "dense_cholesky"] + (["cholmod"] if sksparse else []),
+        solver_types,
         initial_value="conjugate_gradient",
     )
 
-    allow_discontinuous_handle = server.gui.add_checkbox(
-        "Allow discontinuity", initial_value=True
+    smooth_handle = server.gui.add_checkbox(
+        "Smooth", initial_value=False
     )
 
     with server.gui.add_folder("Manipulability"):
@@ -218,12 +222,12 @@ def main(
         )
         manipulability_weight = manipulabiltiy_weight_handler.value
         
-        if allow_discontinuous_handle.value:
-            initial_pose = rest_pose
-            joint_vel_weight = 0.0
-        else:
+        if smooth_handle.value:
             initial_pose = joints
             joint_vel_weight = limit_weight
+        else:
+            initial_pose = rest_pose
+            joint_vel_weight = 0.0
 
         # Solve!
         start_time = time.time()
@@ -231,16 +235,16 @@ def main(
             kin,
             target_poses,
             target_joint_indices,
-            pos_weight,
-            rot_weight,
-            rest_weight,
-            limit_weight,
-            manipulability_weight,
-            joint_vel_weight,
             initial_pose,
-            solver_type_handle.value,
-            get_freeze_target_xyz_xyz(),
-            get_freeze_base_xyz_xyz(),
+            pos_weight=pos_weight,
+            rot_weight=rot_weight,
+            rest_weight=rest_weight,
+            limit_weight=limit_weight,
+            manipulability_weight=manipulability_weight,
+            joint_vel_weight=joint_vel_weight,
+            solver_type=solver_type_handle.value,
+            freeze_base_xyz_xyz=get_freeze_target_xyz_xyz(),
+            freeze_target_xyz_xyz=get_freeze_base_xyz_xyz(),
         )
 
         # Ensure all computations are complete before measuring time
