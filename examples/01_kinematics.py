@@ -6,6 +6,7 @@ from typing import Literal, Optional
 from pathlib import Path
 import time
 from jaxmp.jaxls.robot_factors import RobotFactors
+from loguru import logger
 import tyro
 import viser
 import viser.extras
@@ -18,6 +19,12 @@ import numpy as onp
 from jaxmp.extras.urdf_loader import load_urdf
 from jaxmp.kinematics import JaxKinTree
 from jaxmp.jaxls.solve_ik import solve_ik
+
+try:
+    import sksparse
+except ImportError:
+    logger.info("sksparse not found. Some solvers may not work.")
+    sksparse = None
 
 
 def main(
@@ -104,7 +111,9 @@ def main(
         "Gizmo size", min=0.01, max=0.4, step=0.01, initial_value=0.2
     )
     solver_type_handle = server.gui.add_dropdown(
-        "Solver type", ["cholmod", "conjugate_gradient", "dense_cholesky"]
+        "Solver type",
+        ["conjugate_gradient", "dense_cholesky"] + (["cholmod"] if sksparse else []),
+        initial_value="conjugate_gradient",
     )
 
     allow_discontinuous_handle = server.gui.add_checkbox(
