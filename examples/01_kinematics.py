@@ -227,27 +227,21 @@ def main(
 
         # Solve!
         start_time = time.time()
-        vmap_solve_ik = jax.vmap(
-            lambda poses, inds: solve_ik(
-                kin,
-                poses,
-                inds,
-                pos_weight,
-                rot_weight,
-                rest_weight,
-                limit_weight,
-                manipulability_weight,
-                joint_vel_weight,
-                initial_pose,
-                solver_type_handle.value,
-                get_freeze_target_xyz_xyz(),
-                get_freeze_base_xyz_xyz(),
-            ),
-            in_axes=(0, None),
+        base_pose, joints = solve_ik(
+            kin,
+            target_poses,
+            target_joint_indices,
+            pos_weight,
+            rot_weight,
+            rest_weight,
+            limit_weight,
+            manipulability_weight,
+            joint_vel_weight,
+            initial_pose,
+            solver_type_handle.value,
+            get_freeze_target_xyz_xyz(),
+            get_freeze_base_xyz_xyz(),
         )
-        base_pose, joints = vmap_solve_ik(target_poses, target_joint_indices)
-        base_pose = jaxlie.SE3(base_pose.wxyz_xyz[0])
-        joints = joints[0]
 
         # Ensure all computations are complete before measuring time
         jax.block_until_ready((base_pose, joints))
