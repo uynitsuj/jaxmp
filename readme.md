@@ -12,3 +12,11 @@ Includes:
 Supports:
 - Arbitrary costs, as long as autodiff Jacobians are feasible.
 - A wide range of robots!
+
+---
+## Installation
+```
+pip install git+https://github.com/chungmin99/jaxmp.git
+```
+
+To run examples, install with `pip install -e .[examples]`.
