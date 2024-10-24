@@ -8,6 +8,7 @@ import time
 import jax
 from jaxmp.coll import collide
 
+from loguru import logger
 import tyro
 
 import jax.numpy as jnp
@@ -29,8 +30,8 @@ def main(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    self_coll_weight: float = 2.0,
-    world_coll_weight: float = 10.0,
+    self_coll_weight: float = 1.0,
+    world_coll_weight: float = 5.0,
     robot_urdf_path: Optional[Path] = None,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
@@ -102,6 +103,7 @@ def main(
     # Create factor graph.
     collbody_handle = None
 
+    has_jitted = False
     while True:
         if visualize_coll.value:
             collbody_handle = server.scene.add_mesh_trimesh(
@@ -153,6 +155,7 @@ def main(
             limit_weight=limit_weight,
             manipulability_weight=0.0,
             joint_vel_weight=0.0,
+            include_manipulability=False,
             rest_pose=rest_pose,
             robot_coll=robot_coll,
             world_coll_list=[curr_sphere_obs, ground_obs],
@@ -162,6 +165,9 @@ def main(
         jax.block_until_ready(joints)
         # Update timing info.
         timing_handle.value = (time.time() - start) * 1000
+        if not has_jitted:
+            logger.info("JIT compile + runing took {} ms.", timing_handle.value)
+            has_jitted = True
 
         urdf_vis.update_cfg(onp.array(joints))
 

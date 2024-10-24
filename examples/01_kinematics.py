@@ -203,6 +203,7 @@ def main(
             target_tf_handle.position = onp.array(T_target_world.translation())
             target_tf_handle.wxyz = onp.array(T_target_world.rotation().wxyz)
 
+    has_jitted = False
     while True:
         # Don't do anything if there are no target joints...
         if len(target_name_handles) == 0:
@@ -218,7 +219,7 @@ def main(
             for target_tf_handle in target_tf_handles
         ]
         target_poses = jaxlie.SE3(
-            jnp.stack([pose.wxyz_xyz for pose in target_pose_list])[None].repeat(1000, axis=0)
+            jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
         manipulability_weight = manipulabiltiy_weight_handler.value
         
@@ -241,6 +242,7 @@ def main(
             rest_weight=rest_weight,
             limit_weight=limit_weight,
             manipulability_weight=manipulability_weight,
+            include_manipulability=(manipulability_weight > 0),
             joint_vel_weight=joint_vel_weight,
             solver_type=solver_type_handle.value,
             freeze_base_xyz_xyz=get_freeze_target_xyz_xyz(),
@@ -250,6 +252,9 @@ def main(
         # Ensure all computations are complete before measuring time
         jax.block_until_ready((base_pose, joints))
         timing_handle.value = (time.time() - start_time) * 1000
+        if not has_jitted:
+            logger.info("JIT compile + runing took {} ms.", timing_handle.value)
+            has_jitted = True
 
         # Update visualizations.
         urdf_base_frame.position = onp.array(base_pose.translation())

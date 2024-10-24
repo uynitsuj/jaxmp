@@ -23,6 +23,7 @@ def solve_ik(
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     manipulability_weight: float = 0.0,
+    include_manipulability: jdc.Static[bool] = False,
     joint_vel_weight: float = 0.0,
     self_coll_weight: float = 2.0,
     world_coll_weight: float = 10.0,
@@ -86,29 +87,33 @@ def solve_ik(
 
     ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
     ik_weights = ik_weights * freeze_target_xyz_xyz
-    for idx, target_joint_idx in enumerate(target_joint_indices):
-        factors.extend([
-            jaxls.Factor(
-                RobotFactors.ik_cost,
-                (
-                    kin,
-                    joint_vars[0],
-                    jaxlie.SE3(target_pose.wxyz_xyz[idx]),
-                    target_joint_idx,
-                    ik_weights,
-                    ConstrainedSE3Var(0),
-                ),
+    factors.append(
+        jaxls.Factor(
+            RobotFactors.ik_cost,
+            (
+                kin,
+                joint_vars[0],
+                target_pose,
+                target_joint_indices,
+                ik_weights,
+                ConstrainedSE3Var(0),
             ),
-            jaxls.Factor(
-                RobotFactors.manipulability_cost,
-                (
-                    kin,
-                    joint_vars[0],
-                    target_joint_idx,
-                    jnp.array([manipulability_weight] * kin.num_actuated_joints),
-                ),
+        ),
+    )
+    
+    if include_manipulability:
+        for idx, target_joint_idx in enumerate(target_joint_indices):
+            factors.append(
+                jaxls.Factor(
+                    RobotFactors.manipulability_cost,
+                    (
+                        kin,
+                        joint_vars[0],
+                        target_joint_idx,
+                        jnp.array([manipulability_weight] * kin.num_actuated_joints),
+                    ),
+                )
             )
-        ])
 
     if robot_coll is not None:
         factors.append(
@@ -133,7 +138,7 @@ def solve_ik(
                         robot_coll,
                         JointVar(0),
                         world_coll,
-                        0.05,
+                        0.1,
                         jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
                         ConstrainedSE3Var(0),
                     ),

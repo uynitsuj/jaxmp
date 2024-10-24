@@ -60,7 +60,7 @@ class RobotFactors:
         kin: JaxKinTree,
         var: jaxls.Var[Array],
         target_pose: jaxlie.SE3,
-        target_joint_idx: jdc.Static[int],
+        target_joint_idx: jax.Array,
         weights: Array,
         base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Array:
