@@ -99,6 +99,9 @@ def profile(
     ] = "conjugate_gradient",
     with_collision: bool = False,
 ):
+    # TODO this isn't representative speed-wise, because the samples 
+    # are from a unit sphere and not from the reachable workspace.
+
     logger.disable("jaxmp")
     logger.disable("jaxls")
 
