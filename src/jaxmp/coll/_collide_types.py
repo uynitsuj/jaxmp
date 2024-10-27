@@ -1,6 +1,8 @@
 """
 Small wrapper around mjx collision functions to handle batched geometries,
-This avoids dealing with the MJX model and data structures directly...
+This avoids dealing with the MJX model and data structures directly.
+
+Uses the MJX private API, may break in future versions.
 """
 
 from __future__ import annotations
@@ -45,7 +47,9 @@ class CollGeom(abc.ABC):
         return _self
     
     def transform(self, tf: jaxlie.SE3):
-        with jdc.copy_and_mutate(self, validate=False) as _self:
+        broadcast_axes = jnp.broadcast_shapes(self.get_batch_axes(), tf.get_batch_axes())
+        _self = self.broadcast_to(*broadcast_axes)
+        with jdc.copy_and_mutate(_self, validate=False) as _self:
             _self.mat = (tf.rotation() @ jaxlie.SO3.from_matrix(_self.mat)).as_matrix()
             _self.pos = tf.apply(_self.pos)
         return _self

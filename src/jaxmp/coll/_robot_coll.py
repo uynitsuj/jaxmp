@@ -3,7 +3,7 @@ Differentiable robot collision model, implemented in JAX.
 """
 
 from __future__ import annotations
-from typing import Callable, Optional, cast
+from typing import Callable, Optional, Sequence, cast
 
 from loguru import logger
 
@@ -14,22 +14,25 @@ import yourdfpy
 import jax
 from jax import Array
 import jax.numpy as jnp
+import jaxlie
 
 from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 
-from jaxmp.coll.collide_types import Capsule, CollGeom
+from jaxmp.kinematics import JaxKinTree
+from jaxmp.coll._collide_types import Capsule, CollGeom
 
-def _capsules_from_meshes(meshes: list[trimesh.Trimesh]) -> Capsule:
+
+def _capsules_from_meshes(meshes: Sequence[trimesh.Trimesh]) -> Capsule:
     capsules = [Capsule.from_min_cylinder(mesh) for mesh in meshes]
-    return jax.tree.map(
-        lambda *args: jnp.stack(args), *capsules
-    )
+    return jax.tree.map(lambda *args: jnp.stack(args), *capsules)
+
 
 @jdc.pytree_dataclass
 class RobotColl:
     """Collision model for a robot, which can be put into different configurations."""
-    coll: CollGeom
+
+    coll: CollGeom | Sequence[CollGeom]
 
     coll_link_names: jdc.Static[tuple[str]]
     """Names of the links in the robot, length `links`."""
@@ -45,7 +48,9 @@ class RobotColl:
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
-        coll_handler: Callable[[list[trimesh.Trimesh]], CollGeom] = _capsules_from_meshes,
+        coll_handler: Callable[
+            [Sequence[trimesh.Trimesh]], CollGeom | Sequence[CollGeom]
+        ] = _capsules_from_meshes,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):
@@ -111,7 +116,9 @@ class RobotColl:
         )
 
     @staticmethod
-    def _get_coll_link(urdf: yourdfpy.URDF, curr_link: str) -> Optional[trimesh.Trimesh]:
+    def _get_coll_link(
+        urdf: yourdfpy.URDF, curr_link: str
+    ) -> Optional[trimesh.Trimesh]:
         """
         Get the `CapsuleColl` collision primitives for a given link.
         """
@@ -195,3 +202,19 @@ class RobotColl:
         )
         assert coll_mat.shape == (n_links, n_links)
         return coll_mat
+
+    def at_joints(
+        self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"]
+    ) -> Float[CollGeom, "*batch links"] | Sequence[CollGeom]:
+        """Get the collision model for the robot at a given configuration."""
+        Ts_joint_world = kin.forward_kinematics(cfg)[..., self.link_joint_idx, :]
+
+        if isinstance(self.coll, CollGeom):
+            coll = self.coll.transform(jaxlie.SE3(Ts_joint_world))
+        else:
+            coll = [
+                coll.transform(jaxlie.SE3(Ts_joint_world[..., idx, :]))
+                for idx, coll in enumerate(self.coll)
+            ]
+
+        return coll

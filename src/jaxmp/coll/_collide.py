@@ -1,5 +1,6 @@
 """
 Collision checking, by calling the mjx collision functions.
+Accesses the MJX private api, and may break with future updates.
 
 Some caveats:
 - Returns all collision data: distance, normal, and point.
@@ -22,7 +23,7 @@ from jaxtyping import Float
 from mujoco.mjx._src.collision_driver import _COLLISION_FUNC
 from mujoco.mjx import GeomType
 
-from .collide_types import (
+from ._collide_types import (
     CollGeom,
     Plane,
     Sphere,
@@ -158,6 +159,7 @@ def collide(
     dist = jnp.take_along_axis(dist, idx[..., None], axis=-1)[..., 0]
     pos = jnp.take_along_axis(pos, idx[..., None, None], axis=-1)[..., 0]
     frame = jnp.take_along_axis(frame, idx[..., None, None, None], axis=-1)[..., 0]
+
     return Collision(dist=dist, pos=pos, frame=frame)
 
 
