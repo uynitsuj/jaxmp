@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 import yourdfpy
+import trimesh.transformations as tra
 
 
 def load_urdf(
@@ -69,13 +70,22 @@ def _sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
     return updated_urdf
 
 
-def lock_joints(urdf: yourdfpy.URDF, joint_names: list[str]) -> yourdfpy.URDF:
+def lock_joints(urdf: yourdfpy.URDF, joint_names: list[str], lock_joint_cfg: list[float]) -> yourdfpy.URDF:
     """Lock the joints in the URDF, by setting their limits to the current value."""
     joints = deepcopy(urdf.robot.joints)
     for joint in joints:
         if joint.name in joint_names:
+            # Copied from yourdfpy's _forward_kinematics_joint.
+            joint_cfg = lock_joint_cfg[joint_names.index(joint.name)]
+            if joint.type == "prismatic":
+                matrix = joint.origin @ tra.translation_matrix(joint_cfg * joint.axis)
+            else:
+                matrix = joint.origin @ tra.rotation_matrix(float(joint_cfg), joint.axis)
+
             joint.type = "fixed"
             joint.mimic = None  # Can't mimic a fixed joint.
+            joint.origin = matrix
+
     robot = deepcopy(urdf.robot)
     robot.joints = joints
     return yourdfpy.URDF(
