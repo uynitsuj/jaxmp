@@ -24,7 +24,7 @@ dependencies = [
     "loguru",
     "robot_descriptions",
     "jaxls",
-    "mujoco-mjx",
+    "mujoco-mjx==3.2.3",
 ]
 
 [project.optional-dependencies]
