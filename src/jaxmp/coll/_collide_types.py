@@ -56,6 +56,12 @@ class CollGeom(abc.ABC):
             _self.pose = tf @ _self.pose
         return _self
 
+    def slice(self, *index):
+        with jdc.copy_and_mutate(self, validate=False) as _self:
+            _self.pose = jaxlie.SE3(_self.pose.wxyz_xyz[*index, :])
+            _self.size = self.size[*index, :]
+        return _self
+
     def to_trimesh(self) -> trimesh.Trimesh:
         _self = jax.tree.map(lambda x: x.reshape(-1, x.shape[-1]), self)
 
