@@ -253,7 +253,7 @@ class RobotColl:
             ]
 
         return coll
-    
+
     def self_coll_dist(
         self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"]
     ) -> Float[jax.Array, "*batch"]:
@@ -261,7 +261,9 @@ class RobotColl:
         batch_size = cfg.shape[:-1]
         coll = self.at_joints(kin, cfg)
         if isinstance(coll, CollGeom):
-            dist = collide(coll.reshape(*batch_size, 1, -1), coll.reshape(*batch_size, -1, 1)).dist
+            dist = collide(
+                coll.reshape(*batch_size, 1, -1), coll.reshape(*batch_size, -1, 1)
+            ).dist
             coll_list = jnp.array(self.self_coll_list)
             dist = dist[..., coll_list[:, 0], coll_list[:, 1]]
             dist = dist.min(axis=-1)
@@ -269,7 +271,9 @@ class RobotColl:
             return dist
         else:
             if isinstance(coll[0], Convex):
-                logger.warning("Convex collisions are less reliable, consider using capsules.")
+                logger.warning(
+                    "Convex collisions are less reliable, consider using capsules."
+                )
             min_dist = jnp.full((*batch_size, len(self.self_coll_list)), jnp.inf)
             for idx, (link_0, link_1) in enumerate(self.self_coll_list):
                 for coll_0 in self.link_to_colls[link_0]:
@@ -279,7 +283,10 @@ class RobotColl:
                             jnp.minimum(dist, min_dist[..., idx])
                         )
                         if dist.min() < 0:
-                            print(self.coll_link_names[link_0], self.coll_link_names[link_1])
+                            print(
+                                self.coll_link_names[link_0],
+                                self.coll_link_names[link_1],
+                            )
             assert not jnp.any(jnp.isinf(min_dist))
             min_dist = min_dist.min(axis=-1)
             assert min_dist.shape == batch_size
@@ -297,11 +304,15 @@ class RobotColl:
             return dist
         else:
             if isinstance(coll[0], Convex):
-                logger.warning("Convex collisions are less reliable, consider using capsules.")
+                logger.warning(
+                    "Convex collisions are less reliable, consider using capsules."
+                )
             min_dist = jnp.full((*batch_size, len(coll)), jnp.inf)
             for idx, c in enumerate(coll):
                 dist = collide(c, world).dist
-                min_dist = min_dist.at[..., idx].set(jnp.minimum(dist, min_dist[..., idx]))
+                min_dist = min_dist.at[..., idx].set(
+                    jnp.minimum(dist, min_dist[..., idx])
+                )
             assert not jnp.any(jnp.isinf(min_dist))
             min_dist = min_dist.min(axis=-1)
             assert min_dist.shape == batch_size

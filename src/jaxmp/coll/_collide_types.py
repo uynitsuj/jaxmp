@@ -54,7 +54,9 @@ class CollGeom(abc.ABC):
     def transform(self, tf: jaxlie.SE3):
         with jdc.copy_and_mutate(self, validate=False) as _self:
             _self.pose = tf @ _self.pose
-            _self.size = jnp.broadcast_to(_self.size, _self.pose.get_batch_axes() + (3,))
+            _self.size = jnp.broadcast_to(
+                _self.size, _self.pose.get_batch_axes() + (3,)
+            )
         return _self
 
     def slice(self, *index):
