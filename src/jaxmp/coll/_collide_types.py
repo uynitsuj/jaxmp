@@ -282,8 +282,8 @@ class Cylinder(CollGeom):
 @jdc.pytree_dataclass
 class Convex(CollGeom):
     # Experimental. May be slightly buggy.
-    mesh_info: jdc.Static[ConvexMesh]
-    offset_to_origin: jdc.Static[Float[jax.Array, "*batch 3"]]
+    mesh_info: ConvexMesh
+    offset_to_origin: Float[jax.Array, "*batch 3"]
 
     @staticmethod
     def from_mesh(
@@ -299,7 +299,7 @@ class Convex(CollGeom):
 
         # TODO Check why we must ensure that the mesh includes the origin.
         # Found that this is necessary for convex collisions to work!
-        offset_to_origin = mesh.centroid
+        offset_to_origin = jnp.array(mesh.centroid)
         mesh.vertices -= mesh.centroid
 
         # Decimate the mesh, to make convex-convex feasible.
