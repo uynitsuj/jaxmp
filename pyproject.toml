@@ -23,9 +23,8 @@ dependencies = [
     "jaxtyping",
     "loguru",
     "robot_descriptions",
-    "jaxls",
     "mujoco-mjx==3.2.3",
-    "jaxls @ git+https://github.com/brentyi/jaxls.git",
+    "jaxls",
 ]
 
 [project.optional-dependencies]
