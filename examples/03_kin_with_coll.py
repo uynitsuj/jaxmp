@@ -7,7 +7,6 @@ from pathlib import Path
 import time
 import jax
 import jaxls
-from jaxmp.coll import collide
 
 from loguru import logger
 import tyro
@@ -21,7 +20,7 @@ import viser
 import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
-from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
+from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres
 from jaxmp.extras.urdf_loader import load_urdf
 
 
@@ -35,6 +34,7 @@ def main(
 
     urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf)
+    robot_coll_sph = RobotColl.from_urdf(urdf, link_to_spheres)
     kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     assert isinstance(robot_coll.coll, CollGeom)
@@ -63,13 +63,33 @@ def main(
     server.scene.add_mesh_trimesh("sphere_obs/mesh", sphere_obs.to_trimesh())
 
     # Visualize collision distances.
-    self_coll_value = server.gui.add_number(
-        "max. coll (self)", 0.0, step=0.01, disabled=True
-    )
-    world_coll_value = server.gui.add_number(
-        "max. coll (world)", 0.0, step=0.01, disabled=True
-    )
-    visualize_coll = server.gui.add_checkbox("Visualize spheres", False)
+    with server.gui.add_folder("Collision (cylinder)"):
+        self_coll_value = server.gui.add_number(
+            "max. coll (self)", 0.0, step=0.01, disabled=True
+        )
+        world_coll_value = server.gui.add_number(
+            "max. coll (world)", 0.0, step=0.01, disabled=True
+        )
+        visualize_coll = server.gui.add_checkbox("Visualize coll", False)
+
+        @visualize_coll.on_update
+        def _(_):
+            if visualize_coll_sph.value and visualize_coll.value:
+                visualize_coll_sph.value = False
+
+    with server.gui.add_folder("Collision (sphere)"):
+        self_coll_value_sph = server.gui.add_number(
+            "max. coll (self)", 0.0, step=0.01, disabled=True
+        )
+        world_coll_value_sph = server.gui.add_number(
+            "max. coll (world)", 0.0, step=0.01, disabled=True
+        )
+        visualize_coll_sph = server.gui.add_checkbox("Visualize coll", False)
+
+        @visualize_coll_sph.on_update
+        def _(_):
+            if visualize_coll.value and visualize_coll_sph.value:
+                visualize_coll.value = False
 
     # Add GUI elements, to let user interact with the robot joints.
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
@@ -105,20 +125,27 @@ def main(
 
     has_jitted = False
     while True:
-        if visualize_coll.value:
-            assert isinstance(robot_coll.coll, CollGeom)
-            collbody_handle = server.scene.add_mesh_trimesh(
-                "coll",
-                robot_coll.coll.transform(
-                    jaxlie.SE3(
-                        kin.forward_kinematics(joints)[
-                            ..., robot_coll.link_joint_idx, :
-                        ]
-                    )
-                ).to_trimesh(),
-            )
-        elif collbody_handle is not None:
-            collbody_handle.remove()
+        for _visualize_coll, _robot_coll in [
+            (visualize_coll, robot_coll),
+            (visualize_coll_sph, robot_coll_sph),
+        ]:
+            if _visualize_coll.value:
+                assert isinstance(_robot_coll.coll, CollGeom)
+                collbody_handle = server.scene.add_mesh_trimesh(
+                    "coll",
+                    _robot_coll.coll.transform(
+                        jaxlie.SE3(
+                            kin.forward_kinematics(joints)[
+                                ..., _robot_coll.link_joint_idx, :
+                            ]
+                        )
+                    ).to_trimesh(),
+                )
+                break
+        else:
+            if collbody_handle is not None:
+                collbody_handle.remove()
+                collbody_handle = None
 
         if len(target_name_handles) == 0:
             time.sleep(0.1)
@@ -158,7 +185,7 @@ def main(
         # Update timing info.
         timing_handle.value = (time.time() - start) * 1000
         if not has_jitted:
-            logger.info("JIT compile + runing took {} ms.", timing_handle.value)
+            logger.info("JIT compile + running took {} ms.", timing_handle.value)
             has_jitted = True
 
         urdf_vis.update_cfg(onp.array(joints))
@@ -170,19 +197,17 @@ def main(
             target_frame_handle.position = onp.array(T_target_world)[4:]
             target_frame_handle.wxyz = onp.array(T_target_world)[:4]
 
-        urdf_vis.update_cfg(onp.array(joints))
-
-        coll = robot_coll.at_joints(kin, joints)
-        assert isinstance(coll, CollGeom)
-        dist = collide(coll, coll.reshape(-1, 1)).dist
-        coll_list = jnp.array(robot_coll.self_coll_list)
-        dist = dist[coll_list[:, 0], coll_list[:, 1]]
-        self_coll_value.value = dist.min().item()
-
-        world_coll_value.value = min(
-            collide(coll, ground_obs).dist.min().item(),
-            collide(coll, curr_sphere_obs).dist.min().item(),
-        )
+        # Update collision distances.
+        for _robot_coll, _self_coll_value, _world_coll_value in [
+            (robot_coll, self_coll_value, world_coll_value),
+            (robot_coll_sph, self_coll_value_sph, world_coll_value_sph),
+        ]:
+            _dist = _robot_coll.self_coll_dist(kin, joints)
+            _self_coll_value.value = _dist.item()
+            _world_coll_value.value = min(
+                _robot_coll.world_coll_dist(kin, joints, ground_obs).item(),
+                _robot_coll.world_coll_dist(kin, joints, curr_sphere_obs).item(),
+            )
 
 
 @jdc.jit
@@ -196,7 +221,7 @@ def solve_ik_with_coll(
     *,
     pos_weight: float = 5.0,
     rot_weight: float = 1.0,
-    rest_weight: float = 0.01,
+    rest_weight: float = 0.001,
     limit_weight: float = 100.0,
     self_coll_weight: float = 5.0,
     world_coll_weight: float = 10.0,
@@ -241,19 +266,18 @@ def solve_ik_with_coll(
     )
 
     # Add collision factors.
-    self_coll_factors = RobotFactors.self_coll_factors(
+    self_coll_factor = RobotFactors.self_coll_factor(
         JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
     )
     world_coll_factors = [
-        RobotFactors.get_world_coll_factors(
+        RobotFactors.world_coll_factor(
             JointVar, joint_var_idx, kin, robot_coll, coll, 0.1, world_coll_weight
         )
         for coll in world_coll
     ]
 
-    factors.extend(self_coll_factors)
-    for world_coll_factor in world_coll_factors:
-        factors.extend(world_coll_factor)
+    factors.append(self_coll_factor)
+    factors.extend(world_coll_factors)
 
     # Solve IK.
     joint_vars = [JointVar(joint_var_idx)]
