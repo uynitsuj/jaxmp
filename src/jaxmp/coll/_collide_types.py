@@ -61,8 +61,9 @@ class CollGeom(abc.ABC):
 
     def slice(self, *index):
         with jdc.copy_and_mutate(self, validate=False) as _self:
-            _self.pose = jaxlie.SE3(_self.pose.wxyz_xyz[*index, :])
-            _self.size = self.size[*index, :]
+            # Replace *index with explicit indexing
+            _self.pose = jaxlie.SE3(self.pose.wxyz_xyz[index + (slice(None),)])
+            _self.size = self.size[index + (slice(None),)]
         return _self
 
     def to_trimesh(self) -> trimesh.Trimesh:
