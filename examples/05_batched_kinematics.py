@@ -118,7 +118,7 @@ class YuMiBaseInterface:
         if not minimal:
             # Initialize solver parameters
             self.solver_type = "conjugate_gradient"
-            self.smooth = True
+            self.smooth = False
             self.manipulability_weight = 0.0
             self.has_jitted = False
             
@@ -309,7 +309,10 @@ class YuMiBaseInterface:
                 initial_poses = jnp.tile(self.rest_pose[None, :], (self.num_batches, 1))
             joint_vel_weight = self.limit_weight
         else:
-            initial_poses = jnp.tile(self.rest_pose[None, :], (self.num_batches, 1))
+            if hasattr(self, "joints_all"):
+                initial_poses = self.joints_all
+            else:
+                initial_poses = jnp.tile(self.rest_pose[None, :], (self.num_batches, 1))
             joint_vel_weight = 0.0
         
         target_indices = jnp.array([
