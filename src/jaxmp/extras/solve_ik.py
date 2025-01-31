@@ -7,6 +7,8 @@ import jaxls
 import jax_dataclasses as jdc
 
 from jaxmp.robot_factors import RobotFactors
+from jaxmp.batched_robot_factors import BatchedRobotFactors
+
 from jaxmp.kinematics import JaxKinTree
 
 
@@ -110,6 +112,130 @@ def solve_ik(
     joint_vars: list[jaxls.Var] = [JointVar(joint_var_idx)]
     joint_var_values: list[jaxls.Var | jaxls._variables.VarWithValue] = [
         JointVar(joint_var_idx).with_value(initial_pose)
+    ]
+    if ConstrainedSE3Var is not None and pose_var_idx is not None:
+        joint_vars.append(ConstrainedSE3Var(pose_var_idx))
+        joint_var_values.append(ConstrainedSE3Var(pose_var_idx))
+
+    graph = jaxls.FactorGraph.make(
+        factors,
+        joint_vars,
+        use_onp=False,
+    )
+    solution = graph.solve(
+        linear_solver=solver_type,
+        initial_vals=jaxls.VarValues.make(joint_var_values),
+        trust_region=jaxls.TrustRegionConfig(),
+        termination=jaxls.TerminationConfig(
+            gradient_tolerance=1e-5,
+            parameter_tolerance=1e-5,
+            max_iterations=max_iterations,
+        ),
+        verbose=False,
+    )
+
+    if ConstrainedSE3Var is not None:
+        base_pose = solution[ConstrainedSE3Var(0)]
+    else:
+        base_pose = jaxlie.SE3.identity()
+
+    joints = solution[JointVar(0)]
+    return base_pose, joints
+
+@jdc.jit
+def solve_ik_batched(
+    kin: JaxKinTree,
+    target_poses: jaxlie.SE3,  # (batch_size, n_targets, ...)
+    target_joint_indices: jax.Array,
+    initial_poses: jnp.ndarray,  # (batch_size, num_joints)
+    JointVar: jdc.Static[type[jaxls.Var[jax.Array]]],
+    ik_weight: jnp.ndarray,
+    *,
+    num_batches: jdc.Static[int],
+    joint_var_idx: int = 0,
+    rest_weight: float = 0.01,
+    limit_weight: float = 100.0,
+    joint_vel_weight: float = 0.0,
+    dt: float = 0.01,
+    use_manipulability: jdc.Static[bool] = False,
+    manipulability_weight: float = 0.001,
+    solver_type: jdc.Static[
+        Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
+    ] = "conjugate_gradient",
+    ConstrainedSE3Var: jdc.Static[type[jaxls.Var[jaxlie.SE3]] | None] = None,
+    pose_var_idx: int = 0,
+    max_iterations: int = 50,
+) -> tuple[jaxlie.SE3, jnp.ndarray]:
+    
+    limit_weights = jnp.array([limit_weight] * kin.num_actuated_joints)
+    limit_weights = jnp.tile(limit_weights[None, :], (num_batches, 1))  # shape (batch_size, num_joints)
+
+    vel_weights = jnp.array([joint_vel_weight] * kin.num_actuated_joints)
+    vel_weights = jnp.tile(vel_weights[None, :], (num_batches, 1))  # shape (batch_size, num_joints)
+    
+    rest_weights = jnp.array([rest_weight] * kin.num_actuated_joints)
+    rest_weights = jnp.tile(rest_weights[None, :], (num_batches, 1))  # shape (batch_size, num_joints)
+    
+    
+    """Batched version of solve_ik that handles multiple problems simultaneously."""
+    factors = [
+        BatchedRobotFactors.limit_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            limit_weights,
+        ),
+        BatchedRobotFactors.limit_vel_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            dt,
+            vel_weights,
+            prev_cfg=initial_poses,
+        ),
+        BatchedRobotFactors.rest_cost_factor(
+            JointVar,
+            joint_var_idx,
+            rest_weights,
+        ),
+        BatchedRobotFactors.ik_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            target_poses,
+            target_joint_indices,
+            ik_weight,
+            BaseConstrainedSE3VarType=ConstrainedSE3Var,
+            base_se3_var_idx=pose_var_idx,
+            ),
+    ]
+    factors.append(
+        BatchedRobotFactors.ik_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            target_poses,
+            target_joint_indices,
+            ik_weight,
+            BaseConstrainedSE3VarType=ConstrainedSE3Var,
+            base_se3_var_idx=pose_var_idx,
+        ),
+    )
+
+    if use_manipulability:
+        factors.append(
+            BatchedRobotFactors.manipulability_cost_factor(
+                JointVar,
+                joint_var_idx,
+                kin,
+                target_joint_indices,
+                manipulability_weight,
+            )
+        )
+
+    joint_vars: list[jaxls.Var] = [JointVar(joint_var_idx)]
+    joint_var_values: list[jaxls.Var | jaxls._variables.VarWithValue] = [
+        JointVar(joint_var_idx).with_value(initial_poses)
     ]
     if ConstrainedSE3Var is not None and pose_var_idx is not None:
         joint_vars.append(ConstrainedSE3Var(pose_var_idx))

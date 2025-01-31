@@ -292,6 +292,7 @@ class JaxKinTree:
 
     def get_retract_fn(
         self,
+        is_batched: bool = False,
     ) -> Callable[
         [Float[Array, "*batch num_act_joints"], Float[Array, "*batch num_act_joints"]],
         Float[Array, "*batch num_act_joints"],
@@ -305,6 +306,11 @@ class JaxKinTree:
             delta: Float[Array, "*batch num_act_joints"],
         ) -> Float[Array, "*batch num_act_joints"]:
             """Retract function for the robot."""
+            if is_batched:
+                # For batched operations, reshape delta to match cfg
+                batch_size = cfg.shape[0]
+                delta = delta.reshape(batch_size, -1)
+                
             assert cfg.shape == delta.shape
             assert cfg.shape[-1] == self.num_actuated_joints
 

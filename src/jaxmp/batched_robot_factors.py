@@ -13,25 +13,27 @@ from jaxmp.kinematics import JaxKinTree
 from jaxmp.coll import CollGeom, collide, colldist_from_sdf, RobotColl
 
 
-class RobotFactors:
+class BatchedRobotFactors:
     """Helper class for using `jaxls` factors with a `JaxKinTree` and `RobotColl`."""
 
     @staticmethod
     def get_var_class(
-        kin: JaxKinTree, default_val: Optional[Array] = None
+        kin: JaxKinTree, default_val: Optional[Array] = None, batch_size: int = 1,
     ) -> type[jaxls.Var[Array]]:
         """Get the Variable class for this robot. Default value is `(limits_upper + limits_lower) / 2`."""
         if default_val is None:
             default_val = (kin.limits_upper + kin.limits_lower) / 2
 
-        class JointVar(  # pylint: disable=missing-class-docstring
+        batched_default = jnp.tile(default_val[None, :], (batch_size, 1))
+
+        class BatchedJointVar(  # pylint: disable=missing-class-docstring
             jaxls.Var[Array],
-            default_factory=lambda: default_val.copy(),
-            tangent_dim=kin.num_actuated_joints,
-            retract_fn=kin.get_retract_fn(),
+            default_factory=lambda: batched_default.copy(),
+            tangent_dim=kin.num_actuated_joints * batch_size,  # Adjust tangent dim for batch
+            retract_fn=kin.get_retract_fn(is_batched=True),
         ): ...
 
-        return JointVar
+        return BatchedJointVar
 
     @staticmethod
     def get_constrained_se3(
@@ -60,8 +62,8 @@ class RobotFactors:
         JointVarType: type[jaxls.Var[Array]],
         var_idx: jax.Array | int,
         kin: JaxKinTree,
-        target_pose: jaxlie.SE3,
-        target_joint_idx: jax.Array,
+        target_poses: jaxlie.SE3, # Now shape (batch_size, n_targets, ...)
+        target_joint_indices: jax.Array,
         weights: Array,
         BaseConstrainedSE3VarType: Optional[type[jaxls.Var[jaxlie.SE3]]] = None,
         base_se3_var_idx: Optional[jax.Array | int] = None,
@@ -96,13 +98,26 @@ class RobotFactors:
                 ee_tf = jaxlie.SE3.identity()
 
             Ts_joint_world = kin.forward_kinematics(joint_cfg)
-            residual = (
-                (
-                    base_tf @ jaxlie.SE3(Ts_joint_world[target_joint_idx]) @ ee_tf
-                ).inverse()
-                @ (target_pose)
-            ).log()
-            return (residual * weights).flatten()
+                        
+            def compute_batch_residual(pose_batch, T_batch):
+                # Then vmap over targets dimension
+                def compute_residual(pose, T):
+                    current_tf = jaxlie.SE3(T)
+                    full_tf = base_tf @ current_tf
+                    error = full_tf.inverse() @ pose
+                    return error.log()
+                
+                return jax.vmap(compute_residual)(
+                    pose_batch,  # shape (n_targets, 7)
+                    T_batch,    # shape (n_targets, 7)
+                )
+                
+            residuals = jax.vmap(compute_batch_residual)(
+                target_poses,  # shape (batch_size, n_targets, 7)
+                Ts_joint_world[:, target_joint_indices, :]  # shape (batch_size, n_targets, 7)
+            )
+            
+            return jnp.ravel(residuals * weights)
 
         # Handle optional base and offset transforms.
         # They may either be variables (optimizable) or fixed values.
@@ -142,15 +157,26 @@ class RobotFactors:
             vals: jaxls.VarValues,
             var: jaxls.Var[Array],
         ) -> Array:
-            joint_cfg: jax.Array = vals[var]
-            residual_upper = jnp.maximum(0.0, joint_cfg - kin.limits_upper)
-            residual_lower = jnp.maximum(0.0, kin.limits_lower - joint_cfg)
+            joint_cfg: jax.Array = vals[var]  # shape (batch_size, num_joints)
+            
+            # Expand limits to match batch dimension
+            limits_upper = jnp.broadcast_to(
+                kin.limits_upper, 
+                joint_cfg.shape
+            )
+            limits_lower = jnp.broadcast_to(
+                kin.limits_lower, 
+                joint_cfg.shape
+            )
+            
+            residual_upper = jnp.maximum(0.0, joint_cfg - limits_upper)
+            residual_lower = jnp.maximum(0.0, limits_lower - joint_cfg)
             residual = residual_upper + residual_lower
             assert residual.shape == weights.shape
-            return residual * weights
+            return jnp.ravel(residual * weights)
 
         return jaxls.Factor(limit_cost, (JointVarType(var_idx),))
-
+    
     @staticmethod
     def limit_vel_cost_factor(
         JointVarType: type[jaxls.Var[Array]],
@@ -171,8 +197,9 @@ class RobotFactors:
             prev = vals[var_prev] if isinstance(var_prev, jaxls.Var) else var_prev
             joint_vel = (vals[var_curr] - prev) / dt
             residual = jnp.maximum(0.0, jnp.abs(joint_vel) - kin.joint_vel_limit)
+            
             assert residual.shape == weights.shape
-            return residual * weights
+            return jnp.ravel(residual * weights)
 
         if prev_var_idx is not None:
             var_prev = JointVarType(prev_var_idx)
@@ -201,7 +228,7 @@ class RobotFactors:
             default = var.default_factory()
             assert default is not None
             assert default.shape == vals[var].shape and default.shape == weights.shape
-            return (vals[var] - default) * weights
+            return jnp.ravel((vals[var] - default) * weights)
 
         return jaxls.Factor(rest_cost, (JointVarType(var_idx),))
 
@@ -407,5 +434,3 @@ class RobotFactors:
             lambda cfg: jaxlie.SE3(kin.forward_kinematics(cfg)).translation()
         )(cfg)[target_joint_idx]
         return jnp.sqrt(jnp.linalg.det(jacobian @ jacobian.T))
-
-

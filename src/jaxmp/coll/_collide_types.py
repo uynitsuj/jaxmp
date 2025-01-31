@@ -240,6 +240,8 @@ class Capsule(CollGeom):
         assert capsule.get_batch_axes() == sph_0.get_batch_axes()
         return capsule
 
+    def __len__(self):
+        return self.get_batch_axes()[-1]
 
 @jdc.pytree_dataclass
 class Ellipsoid(CollGeom):

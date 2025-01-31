@@ -20,14 +20,45 @@ import trimesh.sample
 class AntipodalGrasps:
     centers: Float[Array, "*batch 3"]
     axes: Float[Array, "*batch 3"]
+    finger_prox_scores: Optional[Float[Array, "*batch 1"]] = None
 
+    def __post_init__(self):
+        """Validate shapes and types of input arrays."""
+        # Convert to jax arrays if not already
+        if not isinstance(self.centers, jnp.ndarray):
+            self.centers = jnp.array(self.centers)
+        if not isinstance(self.axes, jnp.ndarray):
+            self.axes = jnp.array(self.axes)
+            
+        # Validate shapes
+        assert len(self.centers.shape) >= 2 and self.centers.shape[-1] == 3, \
+            f"centers should have shape (*batch, 3), got {self.centers.shape}"
+        assert self.centers.shape == self.axes.shape, \
+            f"centers and axes should have same shape, got {self.centers.shape} and {self.axes.shape}"
+            
+        # Handle optional finger proximity scores
+        if self.finger_prox_scores is not None:
+            if not isinstance(self.finger_prox_scores, jnp.ndarray):
+                self.finger_prox_scores = jnp.array(self.finger_prox_scores)
+            assert self.finger_prox_scores.shape == self.centers.shape[:-1], \
+                f"finger_prox_scores should have shape {self.centers.shape[:-1]}, got {self.finger_prox_scores.shape}"
+    
+    
     def __len__(self) -> int:
         return self.centers.shape[0]
-
+    
+    def update_scores(self, new_scores: Float[Array, "*batch"]) -> 'AntipodalGrasps':
+        """Create new instance with updated finger proximity scores."""
+        return AntipodalGrasps(
+            centers=self.centers,
+            axes=self.axes,
+            finger_prox_scores=new_scores
+        )
+        
     @staticmethod
     def from_sample_mesh(
         mesh: trimesh.Trimesh,
-        max_samples=100,
+        max_samples=150,
         max_width=float("inf"),
         max_angle_deviation=onp.pi / 4,
     ) -> AntipodalGrasps:
@@ -103,14 +134,30 @@ class AntipodalGrasps:
         mesh = trimesh.creation.cylinder(
             radius=axes_radius, height=axes_height, transform=transform
         )
-        mesh.visual.vertex_colors = [150, 150, 255, 255]  # type: ignore[attr-defined]
+        default_color = onp.array([150, 150, 255, 255])
+        
+        def score_to_color(score: float) -> onp.ndarray:
+            """Map score from [0,1] to color from red (0) to green (1)."""
+            red = onp.array([255, 0, 0, 255])
+            green = onp.array([0, 255, 0, 255])
+            return red + score * (green - red)
 
         meshes = []
         grasp_transforms = self.to_se3(along_axis=along_axis).as_matrix()
         for idx in range(self.centers.shape[0]):
             if indices is not None and idx not in indices:
                 continue
+                
             mesh_copy = mesh.copy()
+            
+            # Set color based on score if available
+            if self.finger_prox_scores is not None:
+                score = self.finger_prox_scores[idx].item()
+                color = score_to_color(score)
+            else:
+                color = default_color
+                
+            mesh_copy.visual.vertex_colors = color  # type: ignore[attr-defined]
             mesh_copy.apply_transform(grasp_transforms[idx])
             meshes.append(mesh_copy)
 
