@@ -22,7 +22,7 @@ def solve_ik(
     ik_weight: jnp.ndarray,
     *,
     joint_var_idx: int = 0,
-    rest_weight: float = 0.01,
+    rest_weight: float = 0.001,
     limit_weight: float = 100.0,
     joint_vel_weight: float = 0.0,
     dt: float = 0.01,
